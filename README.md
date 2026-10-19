@@ -82,7 +82,9 @@ while you're typing in a text field.
 filester-app/
 ├── .github/
 │   ├── dependabot.yml            # weekly cargo + Actions update PRs
-│   └── workflows/ci.yml          # fmt, clippy, 4-distro build/test, MSRV, metadata, cargo-deny
+│   └── workflows/
+│       ├── ci.yml                # fmt, clippy, 4-distro build/test, MSRV, metadata, shellcheck, cargo-deny
+│       └── release.yml           # tag → .deb, .rpm, Arch package, tarball, checksums, GitHub Release
 ├── data/
 │   ├── icons/hicolor/scalable/apps/io.github.scroguard.Filester.svg
 │   ├── io.github.scroguard.Filester.desktop
@@ -113,6 +115,8 @@ filester-app/
 │       ├── preferences.rs        #   Preferences dialog (open mode, cache retention)
 │       ├── settings.rs           #   settings.ini load/save, XDG paths
 │       └── format.rs             #   error text, share-URL validation, markup safety
+├── packaging/arch/PKGBUILD       # Arch / AUR package (builds the tagged source)
+├── install.sh                    # per-user or system install/uninstall, menu entry + icon
 ├── tests/api_client.rs           # end-to-end client tests against a wiremock server
 ├── tests/download.rs             # download + cache tests (incl. "no Authorization header")
 ├── tests/keyring_live.rs         # manual, read-only check against the real keyring
@@ -198,6 +202,90 @@ automatically on first use. The minimum supported Rust version is **1.92**
 (required by gtk4-rs 0.11 and oo7 0.6). Distribution-packaged `rustc` is
 usually older than that, so use rustup.
 
+## Installing
+
+### From a release (no Rust needed)
+
+Each tagged release on the
+[Releases page](https://github.com/scroguard/filester-app/releases) has
+native packages and a universal tarball, all for x86_64:
+
+| Distribution | Download | Install |
+|--------------|----------|---------|
+| Debian 13, Ubuntu 24.04+, Linux Mint 22+ | `filester-app_<version>-1_amd64.deb` | `sudo apt install ./filester-app_*.deb` |
+| Fedora (current releases) | `filester-app-<version>-1.x86_64.rpm` | `sudo dnf install ./filester-app-*.rpm` |
+| Arch Linux, CachyOS | `filester-app-<version>-1-x86_64.pkg.tar.zst` | `sudo pacman -U ./filester-app-*.pkg.tar.zst` |
+| Any of the above, RHEL 10 and clones, older Fedora | `filester-app-<version>-x86_64-linux.tar.gz` | unpack, then `./install.sh` |
+
+The `.rpm` and Arch packages are built on the newest Fedora and Arch, so
+they need an equally current system. The tarball is built on Ubuntu 24.04,
+the oldest C library (glibc 2.39) in the support matrix, and runs on every
+supported distribution.
+
+The packages pull in GTK 4 and libadwaita automatically and put Filester in
+your application menu. Remove them with your package manager as usual
+(`sudo apt remove filester-app`, `sudo dnf remove filester-app`,
+`sudo pacman -R filester-app`).
+
+Verify a download before installing:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify filester-app_*.deb --repo scroguard/filester-app   # built by this repo's CI
+```
+
+The tarball contains a prebuilt binary and the installer described next. It
+needs GTK 4.14+ and libadwaita 1.5+ installed (see
+[Runtime dependencies](#runtime-dependencies)). The installer checks for them
+and prints the right package command if any are missing.
+
+### With the installer script
+
+`install.sh` installs Filester and its menu entry and icon. It works from an
+unpacked release tarball (using the bundled binary) or from a source
+checkout (building with cargo first, which needs the
+[build dependencies](#build-dependencies)):
+
+```sh
+./install.sh                # just you: ~/.local/bin, ~/.local/share (no root)
+./install.sh --system       # everyone: /usr/local (asks for sudo for the copy step only)
+./install.sh --prefix DIR   # anywhere: DIR/bin, DIR/share
+```
+
+The menu entry points at the installed binary by absolute path, so it works
+even if `~/.local/bin` is not on your `PATH`. The build never runs as root.
+
+To remove it, repeat the same options with `--uninstall`. Add `--purge` to
+also delete your settings and download cache (per-user only). The API key in
+your keyring is kept; the uninstaller prints the command that removes it.
+
+```sh
+./install.sh --uninstall [--system | --prefix DIR] [--purge]
+```
+
+### Arch User Repository
+
+`packaging/arch/PKGBUILD` builds a tagged release from source and is ready
+to publish to the AUR. To build it yourself:
+
+```sh
+cd packaging/arch && makepkg -si
+```
+
+### Making a release (maintainers)
+
+1. Bump the version in `Cargo.toml` (then `cargo check` to update
+   `Cargo.lock`), `pkgver` in `packaging/arch/PKGBUILD`, and add a
+   `<release>` entry to `data/io.github.scroguard.Filester.metainfo.xml`.
+2. Commit, then tag and push: `git tag -s v0.2.0 && git push origin v0.2.0`.
+3. `.github/workflows/release.yml` checks that the versions match, builds
+   the `.deb` and tarball (Ubuntu 24.04), `.rpm` (Fedora) and Arch package,
+   installs each one in a clean container, then publishes a GitHub Release
+   with `SHA256SUMS` and signed build-provenance attestations.
+
+Run the workflow manually (Actions → Release → Run workflow) to build and
+test the packages without publishing anything.
+
 ## Building and running
 
 ```sh
@@ -213,23 +301,6 @@ Logging goes to stderr and is controlled by `FILESTER_LOG` (tracing
 ```sh
 FILESTER_LOG=filester_app=debug cargo run
 ```
-
-### Installing (per user, no root)
-
-```sh
-cargo build --release --locked
-install -Dm755 target/release/filester-app ~/.local/bin/filester-app
-install -Dm644 data/io.github.scroguard.Filester.desktop \
-    ~/.local/share/applications/io.github.scroguard.Filester.desktop
-install -Dm644 data/io.github.scroguard.Filester.metainfo.xml \
-    ~/.local/share/metainfo/io.github.scroguard.Filester.metainfo.xml
-install -Dm644 data/icons/hicolor/scalable/apps/io.github.scroguard.Filester.svg \
-    ~/.local/share/icons/hicolor/scalable/apps/io.github.scroguard.Filester.svg
-```
-
-For a system-wide install, replace `~/.local` with `/usr/local` and run as
-root. Make sure `~/.local/bin` is on your `PATH`, because the desktop entry
-calls `filester-app` by name.
 
 ## Filester API coverage
 

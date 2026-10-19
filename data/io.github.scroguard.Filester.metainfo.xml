@@ -21,6 +21,7 @@
       <li>Stream uploads of files up to 10 GB without loading them into memory</li>
       <li>Respect the service rate limit automatically</li>
       <li>Keep your API key in the system keyring, never in plain-text files</li>
+      <li>Open public files in your default apps, with optional automatic cleanup</li>
     </ul>
   </description>
 
@@ -49,9 +50,14 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="0.1.0" date="2026-10-18">
+    <release version="0.1.0" date="2026-10-19">
       <description>
-        <p>Project scaffold: build system, CI and application shell.</p>
+        <p>First release.</p>
+        <ul>
+          <li>Sign in with an API key stored in the system keyring</li>
+          <li>Folder tree, file grid, uploads with progress, new folder and delete</li>
+          <li>Optionally open public files in local apps, with automatic cleanup of downloaded copies</li>
+        </ul>
       </description>
     </release>
   </releases>

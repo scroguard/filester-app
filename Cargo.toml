@@ -23,6 +23,46 @@ path = "src/lib.rs"
 name = "filester-app"
 path = "src/main.rs"
 
+# --- Native packages -------------------------------------------------------
+# Built by .github/workflows/release.yml: `cargo deb` on Ubuntu 24.04 (the
+# oldest glibc in the support matrix, so the .deb also runs on Debian 13) and
+# `cargo generate-rpm` on Fedora. Arch uses packaging/arch/PKGBUILD.
+[package.metadata.deb]
+maintainer = "scroguard <github@justinalbrecht.com>"
+copyright = "2026 scroguard"
+section = "net"
+priority = "optional"
+# Resolved by dpkg-shlibdeps from the binary's linked libraries
+# (libgtk-4-1, libadwaita-1-0, libc6, ...).
+depends = "$auto"
+recommends = "gnome-keyring | kwalletmanager | keepassxc, ca-certificates"
+extended-description = """\
+An unofficial native GTK4/libadwaita client for the Filester cloud storage \
+service: browse folders, upload files up to 10 GB, and manage your storage. \
+The API key is kept in the system keyring. Not affiliated with Filester."""
+assets = [
+    ["target/release/filester-app", "usr/bin/", "755"],
+    ["data/io.github.scroguard.Filester.desktop", "usr/share/applications/", "644"],
+    ["data/io.github.scroguard.Filester.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["data/icons/hicolor/scalable/apps/io.github.scroguard.Filester.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["README.md", "usr/share/doc/filester-app/", "644"],
+]
+
+[package.metadata.generate-rpm]
+summary = "Native GTK4/libadwaita client for Filester cloud storage (unofficial)"
+assets = [
+    { source = "target/release/filester-app", dest = "/usr/bin/filester-app", mode = "755" },
+    { source = "data/io.github.scroguard.Filester.desktop", dest = "/usr/share/applications/io.github.scroguard.Filester.desktop", mode = "644" },
+    { source = "data/io.github.scroguard.Filester.metainfo.xml", dest = "/usr/share/metainfo/io.github.scroguard.Filester.metainfo.xml", mode = "644" },
+    { source = "data/icons/hicolor/scalable/apps/io.github.scroguard.Filester.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.scroguard.Filester.svg", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/filester-app/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/filester-app/LICENSE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+gtk4 = ">= 4.14"
+libadwaita = ">= 1.5"
+
 [dependencies]
 # --- GUI ------------------------------------------------------------------
 # Feature floors are chosen to match the oldest supported distro baseline

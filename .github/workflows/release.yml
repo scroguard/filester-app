@@ -1,0 +1,257 @@
+# Release packaging for filester-app.
+#
+# Triggers:
+#   * push of a tag `vX.Y.Z`: build every package, then publish a GitHub
+#     Release with the packages, SHA256SUMS and build-provenance attestations.
+#   * workflow_dispatch: build and smoke-test every package and keep them as
+#     workflow artifacts, but publish nothing. Use it to try packaging
+#     changes before tagging.
+#
+# Jobs:
+#   versions  - the tag (if any), Cargo.toml, PKGBUILD and metainfo agree
+#   deb       - .deb (cargo-deb) and the universal tarball, built on Ubuntu
+#               24.04: the oldest glibc in the support matrix, so both also
+#               run on Debian 13, Fedora and Arch
+#   rpm       - .rpm (cargo-generate-rpm), built on Fedora
+#   arch      - .pkg.tar.zst from packaging/arch/PKGBUILD via makepkg
+#   publish   - tag builds only: checksums, attestations, GitHub Release
+#
+# Every package is installed in a clean container and its binary's library
+# links checked before it is accepted.
+#
+# Hardening matches ci.yml: SHA-pinned actions, read-only token by default
+# (only `publish` gets write access), no persisted checkout credentials,
+# --locked builds, and packaging tools installed at pinned versions.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_DEB_VERSION: "3.8.0"
+  CARGO_GENERATE_RPM_VERSION: "0.21.0"
+
+jobs:
+  versions:
+    name: version consistency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: check
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          cargo_ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          pkg_ver=$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)
+          meta_ver=$(grep -o '<release version="[^"]*"' data/io.github.scroguard.Filester.metainfo.xml \
+            | head -n1 | sed 's/.*"\(.*\)"/\1/')
+          echo "Cargo.toml=$cargo_ver PKGBUILD=$pkg_ver metainfo=$meta_ver"
+          [ "$cargo_ver" = "$pkg_ver" ] || { echo "::error::PKGBUILD pkgver differs from Cargo.toml"; exit 1; }
+          [ "$cargo_ver" = "$meta_ver" ] || { echo "::error::newest metainfo <release> differs from Cargo.toml"; exit 1; }
+          if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "v$cargo_ver" ]; then
+            echo "::error::tag $REF_NAME does not match Cargo.toml version $cargo_ver"; exit 1
+          fi
+          echo "version=$cargo_ver" >> "$GITHUB_OUTPUT"
+
+  deb:
+    name: .deb + tarball (Ubuntu 24.04)
+    needs: versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ubuntu:24.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      VERSION: ${{ needs.versions.outputs.version }}
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev libadwaita-1-dev dpkg-dev \
+            curl git ca-certificates
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - run: cargo build --locked --release
+      - run: cargo install --locked cargo-deb --version "$CARGO_DEB_VERSION"
+      - name: Build .deb
+        run: cargo deb --locked --no-build --output dist/
+      - name: Build universal tarball
+        run: |
+          name="filester-app-$VERSION-x86_64-linux"
+          stage="dist/stage/$name"
+          install -Dm755 target/release/filester-app "$stage/bin/filester-app"
+          strip "$stage/bin/filester-app"
+          cp -r data "$stage/"
+          install -m755 install.sh "$stage/install.sh"
+          install -m644 README.md LICENSE "$stage/"
+          tar -C dist/stage --owner=0 --group=0 --numeric-owner --sort=name \
+            -czf "dist/$name.tar.gz" "$name"
+          rm -rf dist/stage
+      - name: Smoke-test the .deb on a clean system
+        run: |
+          apt-get purge -y --auto-remove libgtk-4-dev libadwaita-1-dev
+          apt-get install -y ./dist/*.deb
+          dpkg -L filester-app
+          if ldd /usr/bin/filester-app | grep 'not found'; then exit 1; fi
+          dpkg-deb -f dist/*.deb Package Version Depends Recommends
+          apt-get remove -y filester-app
+      - name: Smoke-test the tarball installer
+        run: |
+          tmp=$(mktemp -d)
+          tar -C "$tmp" -xzf dist/filester-app-*-x86_64-linux.tar.gz
+          "$tmp"/filester-app-*/install.sh --prefix "$tmp/prefix"
+          test -x "$tmp/prefix/bin/filester-app"
+          grep -q '^Exec="' "$tmp/prefix/share/applications/io.github.scroguard.Filester.desktop"
+          "$tmp"/filester-app-*/install.sh --uninstall --prefix "$tmp/prefix"
+          test ! -e "$tmp/prefix/bin/filester-app"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deb
+          path: dist/*
+          if-no-files-found: error
+
+  rpm:
+    name: .rpm (Fedora)
+    needs: versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: fedora:latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf -y install \
+            gcc gcc-c++ make pkgconf-pkg-config gtk4-devel libadwaita-devel \
+            rpm-build curl git ca-certificates
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - run: cargo build --locked --release
+      - run: strip target/release/filester-app
+      - run: cargo install --locked cargo-generate-rpm --version "$CARGO_GENERATE_RPM_VERSION"
+      - name: Build .rpm
+        run: cargo generate-rpm --output dist/
+      - name: Smoke-test the .rpm on a clean system
+        run: |
+          dnf -y remove gtk4-devel libadwaita-devel
+          dnf -y install ./dist/*.rpm
+          rpm -qlp dist/*.rpm
+          rpm -qp --requires dist/*.rpm
+          if ldd /usr/bin/filester-app | grep 'not found'; then exit 1; fi
+          dnf -y remove filester-app
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  arch:
+    name: Arch package (makepkg)
+    needs: versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel pkgconf gtk4 libadwaita rust git ca-certificates
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # makepkg clones this checkout
+      - name: Build with makepkg (unprivileged user)
+        run: |
+          useradd --create-home builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          # Build this exact commit from the local checkout. For a tag, the
+          # commit is the tagged one, so the result equals the AUR build.
+          sudo -u builder env \
+            FILESTER_SOURCE="git+file://$GITHUB_WORKSPACE#commit=$GITHUB_SHA" \
+            bash -c 'cd packaging/arch && makepkg --noconfirm --cleanbuild'
+          mkdir -p dist
+          cp packaging/arch/*.pkg.tar.zst dist/
+      - name: Smoke-test the package
+        run: |
+          pacman -U --noconfirm dist/*.pkg.tar.zst
+          pacman -Qlq filester-app
+          if ldd /usr/bin/filester-app | grep 'not found'; then exit 1; fi
+          pacman -R --noconfirm filester-app
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: arch
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub Release
+    if: github.ref_type == 'tag'
+    needs: [versions, deb, rpm, arch]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the release
+      id-token: write # sign provenance attestations
+      attestations: write
+    env:
+      VERSION: ${{ needs.versions.outputs.version }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cat > notes.md <<EOF
+          Filester $VERSION for Linux.
+
+          | File | For |
+          |------|-----|
+          | \`filester-app_*.deb\` | Debian 13, Ubuntu 24.04+, Linux Mint 22+: \`sudo apt install ./filester-app_*.deb\` |
+          | \`filester-app-*.rpm\` | Fedora: \`sudo dnf install ./filester-app-*.rpm\` |
+          | \`filester-app-*.pkg.tar.zst\` | Arch / CachyOS: \`sudo pacman -U filester-app-*.pkg.tar.zst\` |
+          | \`filester-app-$VERSION-x86_64-linux.tar.gz\` | any of the above: unpack, then \`./install.sh\` (per user) or \`./install.sh --system\` |
+
+          Verify downloads with \`sha256sum -c SHA256SUMS --ignore-missing\`, and their build provenance with
+          \`gh attestation verify <file> --repo $GH_REPO\`.
+          EOF
+          gh release create "$TAG" --verify-tag --title "Filester $VERSION" --notes-file notes.md dist/*

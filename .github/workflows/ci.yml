@@ -6,7 +6,8 @@
 #   distro    - build + test inside Arch, Fedora, Debian and Ubuntu containers,
 #               installing GTK/libadwaita from each distro's own package manager
 #   msrv      - compile with the exact `rust-version` from Cargo.toml
-#   metadata  - validate the .desktop entry and AppStream metainfo
+#   metadata  - validate the .desktop entry and AppStream metainfo; shellcheck
+#               install.sh and the PKGBUILD
 #   deny      - supply-chain audit (RustSec advisories, licences, sources)
 #
 # Hardening:
@@ -159,7 +160,7 @@ jobs:
       - run: cargo +${{ env.MSRV }} check --locked --all-targets
 
   metadata:
-    name: desktop & AppStream metadata
+    name: metadata & packaging scripts
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -172,6 +173,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends desktop-file-utils appstream
       - run: desktop-file-validate data/io.github.scroguard.Filester.desktop
       - run: appstreamcli validate --no-net --explain data/io.github.scroguard.Filester.metainfo.xml
+      # shellcheck is preinstalled on GitHub's Ubuntu runners.
+      - name: Lint install.sh (POSIX sh)
+        run: shellcheck --shell=sh --severity=style install.sh
+      - name: Lint PKGBUILD (bash)
+        run: shellcheck --shell=bash --exclude=SC2034,SC2154,SC2164 packaging/arch/PKGBUILD
 
   deny:
     name: cargo-deny
