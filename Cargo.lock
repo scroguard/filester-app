@@ -487,6 +487,7 @@ dependencies = [
  "gtk4",
  "httpdate",
  "libadwaita",
+ "mime_guess",
  "oo7",
  "rand 0.10.3",
  "reqwest",

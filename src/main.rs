@@ -6,13 +6,12 @@
 //!    credentials; see the "Security & Auditing" section of `README.md`.
 //! 2. Create the [`adw::Application`] and hand control to the GTK main loop.
 //!
-//! Networking and other blocking work never run on this thread. The
-//! background worker pool arrives with the API engine (Phase 2), and the main
-//! window module (Phase 3) replaces [`build_shell`].
-
-mod config;
+//! Networking and other blocking work never run on this thread. The API
+//! engine and background worker live in the `filester_app` library; the main
+//! window module (Phase 3) starts the worker and replaces [`build_shell`].
 
 use adw::prelude::*;
+use filester_app::config;
 use gtk::glib;
 use tracing_subscriber::EnvFilter;
 

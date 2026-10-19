@@ -26,7 +26,7 @@ release notes unless you ask otherwise.
 In scope:
 
 - Leakage of the Filester API key (disk, logs, memory after sign-out, IPC,
-  network to any host other than `filester.me`)
+  network to any host other than the API origin `u1.filester.me`)
 - TLS validation bypasses or cleartext fallbacks
 - Path traversal or unsafe handling of server-supplied file and folder names
 - Memory-safety issues, including in dependencies as used by this application
