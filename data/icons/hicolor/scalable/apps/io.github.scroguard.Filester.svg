@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#62a0ea"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+  </defs>
+  <!-- folder back -->
+  <path d="M14 30a8 8 0 0 1 8-8h26l10 10h48a8 8 0 0 1 8 8v8H14z" fill="#1a5fb4"/>
+  <!-- folder front -->
+  <rect x="14" y="40" width="100" height="70" rx="8" fill="url(#body)"/>
+  <!-- cloud -->
+  <path d="M46 94h38a12 12 0 0 0 1.5-23.9A17 17 0 0 0 53 66a13 13 0 0 0-7 28z" fill="#ffffff"/>
+  <!-- upload arrow -->
+  <path d="M64 70l-9 10h6v10h6V80h6z" fill="#1c71d8"/>
+</svg>

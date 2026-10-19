@@ -1,0 +1,4 @@
+msrv = "1.92"
+# Tests may use unwrap/expect for brevity; production code may not.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

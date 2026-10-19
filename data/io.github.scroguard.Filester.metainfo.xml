@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 scroguard -->
+<component type="desktop-application">
+  <id>io.github.scroguard.Filester</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Filester</name>
+  <summary>Manage your Filester cloud storage</summary>
+  <developer id="io.github.scroguard">
+    <name>scroguard</name>
+  </developer>
+
+  <description>
+    <p>
+      An unofficial native GTK4 and libadwaita client for the Filester cloud
+      storage service. It is not affiliated with or endorsed by Filester.
+    </p>
+    <ul>
+      <li>Browse your folder hierarchy from a sidebar</li>
+      <li>Stream uploads of files up to 10 GB without loading them into memory</li>
+      <li>Respect the service rate limit automatically</li>
+      <li>Keep your API key in the system keyring, never in plain-text files</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.scroguard.Filester.desktop</launchable>
+  <provides>
+    <binary>filester-app</binary>
+  </provides>
+
+  <url type="homepage">https://github.com/scroguard/filester-app</url>
+  <url type="bugtracker">https://github.com/scroguard/filester-app/issues</url>
+  <url type="vcs-browser">https://github.com/scroguard/filester-app</url>
+
+  <categories>
+    <category>Network</category>
+    <category>FileTransfer</category>
+  </categories>
+
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-10-18">
+      <description>
+        <p>Project scaffold: build system, CI and application shell.</p>
+      </description>
+    </release>
+  </releases>
+</component>

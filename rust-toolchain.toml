@@ -1,0 +1,7 @@
+# Developer toolchain. CI additionally builds with the exact MSRV declared in
+# Cargo.toml (`rust-version`) to catch accidental use of newer language
+# features.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

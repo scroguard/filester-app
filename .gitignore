@@ -1,0 +1,102 @@
+# =========================================================================
+# filester-app .gitignore
+#
+# Policy: build output and anything that could hold a credential must never
+# reach the remote. When in doubt, add it here and review `git status`
+# before every push. Cargo.lock IS committed (this is a binary crate; the
+# lockfile is part of the auditable supply chain).
+# =========================================================================
+
+# --- Rust / Cargo build output ----------------------------------------------
+/target/
+**/*.rs.bk
+*.pdb
+
+# --- Meson / Flatpak / packaging build trees ---------------------------------
+/builddir/
+/_build/
+/build/
+/.flatpak-builder/
+/flatpak-build/
+/repo/
+*.flatpak
+/pkg/
+/src/*.tar.*
+*.pkg.tar.*
+*.deb
+*.rpm
+/debian/.debhelper/
+/rpmbuild/
+
+# --- Secrets & credentials ---------------------------------------------------
+# The application stores API keys in the Secret Service, never on disk.
+# These patterns guard against keys pasted into ad-hoc files during
+# development or testing.
+.env
+.env.*
+!.env.example
+*.env
+*.secret
+*.secrets
+secrets.*
+*secret*.json
+*credentials*
+*.token
+api_key*
+apikey*
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+*.gpg
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.kdbx
+.netrc
+# The broad name patterns above must never hide source or docs.
+!*.rs
+!*.md
+!*.toml
+!*.yml
+
+# --- Test & debugging artefacts ----------------------------------------------
+# HTTP captures may contain Authorization headers.
+*.har
+*.pcap
+*.pcapng
+mitmproxy*
+/tests/fixtures/local/
+*.profraw
+*.profdata
+/coverage/
+lcov.info
+tarpaulin-report.*
+perf.data*
+flamegraph.svg
+/core
+/core.[0-9]*
+vgcore.*
+
+# --- Logs --------------------------------------------------------------------
+*.log
+
+# --- Editors & OS ------------------------------------------------------------
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.code-workspace
+*.swp
+*.swo
+*~
+.#*
+\#*\#
+.DS_Store
+Thumbs.db
+.directory
+
+# --- Local tool state --------------------------------------------------------
+.claude/settings.local.json
+.direnv/
+.envrc

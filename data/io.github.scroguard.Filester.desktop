@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Filester
+GenericName=Cloud Storage Client
+Comment=Browse, upload and manage files stored on Filester
+Exec=filester-app
+Icon=io.github.scroguard.Filester
+Terminal=false
+Categories=Network;FileTransfer;GTK;
+Keywords=cloud;storage;upload;sync;files;
+StartupNotify=true
+DBusActivatable=false

@@ -1,0 +1,105 @@
+[package]
+name = "filester-app"
+version = "0.1.0"
+edition = "2024"
+# gtk4 0.11 and oo7 0.6 both declare MSRV 1.92; keep this in sync with
+# clippy.toml and the `msrv` job in .github/workflows/ci.yml.
+rust-version = "1.92"
+description = "Native GTK4/libadwaita desktop client for the Filester cloud storage service (unofficial)"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/scroguard/filester-app"
+readme = "README.md"
+keywords = ["gtk4", "libadwaita", "cloud-storage", "filester", "linux"]
+categories = ["gui", "filesystem"]
+publish = false
+
+[[bin]]
+name = "filester-app"
+path = "src/main.rs"
+
+[dependencies]
+# --- GUI ------------------------------------------------------------------
+# Feature floors are chosen to match the oldest supported distro baseline
+# (Ubuntu 24.04 LTS: GTK 4.14, libadwaita 1.5). Raising them drops that
+# baseline; see the dependency matrix in README.md before changing.
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+
+# --- Async runtime & networking -------------------------------------------
+# Tokio runs on a dedicated background worker pool, never on the GTK main
+# thread. Results are handed back to the UI over async-channel.
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+async-channel = "2.5"
+bytes = "1"
+# rustls + rustls-platform-verifier (system trust store) instead of
+# OpenSSL: no libssl-dev / openssl-devel ABI differences across distros.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "http2",
+    "json",
+    "multipart",
+    "stream",
+    "system-proxy",
+] }
+url = "2.5"
+httpdate = "1"
+rand = "0.10"
+
+# --- Secrets ----------------------------------------------------------------
+# oo7: pure-Rust Secret Service client (GNOME Keyring, KWallet, KeePassXC)
+# with automatic fallback to the XDG Secret portal inside Flatpak.
+oo7 = { version = "0.6", default-features = false, features = ["tokio", "native_crypto"] }
+# API keys are held in `SecretString`, which zeroizes on drop and redacts
+# itself from `Debug` output.
+secrecy = "0.10"
+zeroize = "1.8"
+
+# --- Data & errors ------------------------------------------------------------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# --- Diagnostics --------------------------------------------------------------
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tempfile = "3"
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time", "test-util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Unchecked unwrap/expect/panic paths are not accepted in shipped code;
+# tests opt out locally with `#[allow(...)]`.
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
+# GTK signal handlers routinely take ownership of cloned widgets.
+needless_pass_by_value = "allow"
+module_name_repetitions = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+# Keep integer overflow checks in release builds: byte counters and
+# progress math must fail loudly, not wrap.
+overflow-checks = true
+
+[profile.dev.package."*"]
+# Dependencies (GTK bindings, rustls, aws-lc) are slow unoptimised.
+opt-level = 2

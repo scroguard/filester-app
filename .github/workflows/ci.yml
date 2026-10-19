@@ -1,0 +1,192 @@
+# Continuous integration for filester-app.
+#
+# Jobs:
+#   fmt       - rustfmt check (no system deps)
+#   clippy    - strict lints, warnings are errors
+#   distro    - build + test inside Arch, Fedora, Debian and Ubuntu containers,
+#               installing GTK/libadwaita from each distro's own package manager
+#   msrv      - compile with the exact `rust-version` from Cargo.toml
+#   metadata  - validate the .desktop entry and AppStream metainfo
+#   deny      - supply-chain audit (RustSec advisories, licences, sources)
+#
+# Hardening:
+#   * Third-party actions are pinned to full commit SHAs (tag in trailing
+#     comment); Dependabot (.github/dependabot.yml) proposes bumps.
+#   * The default GITHUB_TOKEN is read-only, and checkout does not persist
+#     credentials into .git/config.
+#   * Every cargo invocation uses --locked, so CI builds exactly the audited
+#     Cargo.lock.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: "-D warnings"
+  RUST_BACKTRACE: "1"
+  # Must match `rust-version` in Cargo.toml and `msrv` in clippy.toml.
+  MSRV: "1.92"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install system dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev libadwaita-1-dev
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  distro:
+    name: build & test (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Rolling release; also the CachyOS base.
+          - name: arch
+            image: archlinux:base-devel
+            family: pacman
+          - name: fedora
+            image: fedora:latest
+            family: dnf
+          - name: debian-13
+            image: debian:trixie
+            family: apt
+          # Oldest supported baseline: GTK 4.14 / libadwaita 1.5.
+          - name: ubuntu-24.04
+            image: ubuntu:24.04
+            family: apt
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      # Package lists below must stay in sync with the README dependency matrix.
+      - name: Install system dependencies (pacman)
+        if: matrix.family == 'pacman'
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel pkgconf gtk4 libadwaita curl git ca-certificates
+      - name: Install system dependencies (dnf)
+        if: matrix.family == 'dnf'
+        run: |
+          dnf -y install \
+            gcc gcc-c++ make pkgconf-pkg-config gtk4-devel libadwaita-devel \
+            curl git ca-certificates
+      - name: Install system dependencies (apt)
+        if: matrix.family == 'apt'
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
+            curl git ca-certificates
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+        with:
+          key: ${{ matrix.name }}
+      - name: Report library versions
+        run: pkg-config --modversion gtk4 libadwaita-1
+      - run: cargo build --locked --all-targets
+      - run: cargo test --locked --all-targets
+      - run: cargo build --locked --release
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install system dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev libadwaita-1-dev
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.MSRV }}
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+        with:
+          key: msrv
+      # `+toolchain` overrides rust-toolchain.toml, which selects stable.
+      - run: cargo +${{ env.MSRV }} check --locked --all-targets
+
+  metadata:
+    name: desktop & AppStream metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends desktop-file-utils appstream
+      - run: desktop-file-validate data/io.github.scroguard.Filester.desktop
+      - run: appstreamcli validate --no-net --explain data/io.github.scroguard.Filester.metainfo.xml
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, "bans licenses sources"]
+    # A newly published advisory must not block unrelated PRs, but stays visible.
+    continue-on-error: ${{ matrix.checks == 'advisories' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
+        with:
+          command: check ${{ matrix.checks }}
