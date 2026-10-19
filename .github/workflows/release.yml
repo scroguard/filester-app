@@ -156,7 +156,10 @@ jobs:
       - run: strip target/release/filester-app
       - run: cargo install --locked cargo-generate-rpm --version "$CARGO_GENERATE_RPM_VERSION"
       - name: Build .rpm
-        run: cargo generate-rpm --output dist/
+        # --output names a file unless the directory already exists.
+        run: |
+          mkdir -p dist
+          cargo generate-rpm --output dist/
       - name: Smoke-test the .rpm on a clean system
         run: |
           dnf -y remove gtk4-devel libadwaita-devel
