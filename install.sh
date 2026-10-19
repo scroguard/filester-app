@@ -1,12 +1,12 @@
 #!/bin/sh
-# Install or uninstall Filester for the current user or system-wide.
+# Install or uninstall Filester Manager for the current user or system-wide.
 #
 #   ./install.sh                  per-user install into ~/.local (no root)
 #   ./install.sh --system         system-wide install into /usr/local (uses sudo)
 #   ./install.sh --prefix DIR     install into DIR/bin and DIR/share
 #   ./install.sh --uninstall      remove what the matching install put in place
 #   ./install.sh --uninstall --purge
-#                                 also delete your Filester settings and
+#                                 also delete your Filester Manager settings and
 #                                 download cache (per-user mode only)
 #
 # Run it from a source checkout (it builds with cargo) or from an unpacked
@@ -205,7 +205,7 @@ fi
 
 # Missing shared libraries mean the runtime packages are absent.
 if command -v ldd >/dev/null 2>&1 && ldd "$built" 2>/dev/null | grep -q 'not found'; then
-    say "Some libraries Filester needs are missing:"
+    say "Some libraries Filester Manager needs are missing:"
     ldd "$built" | grep 'not found' | sed 's/^/  /'
     say "Install them with:"
     hint_runtime
@@ -239,7 +239,7 @@ as_target install -Dm644 "$SRC_DIR/data/icons/hicolor/scalable/apps/$APP_ID.svg"
 refresh_caches
 
 say ""
-say "Filester is installed. Open it from your application menu, or run:"
+say "Filester Manager is installed. Open it from your application menu, or run:"
 say "  $bin_path"
 if [ "$mode" = user ]; then
     case ":${PATH:-}:" in

@@ -249,7 +249,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           cat > notes.md <<EOF
-          Filester $VERSION for Linux.
+          Filester Manager $VERSION for Linux.
 
           | File | For |
           |------|-----|
@@ -261,4 +261,4 @@ jobs:
           Verify downloads with \`sha256sum -c SHA256SUMS --ignore-missing\`, and their build provenance with
           \`gh attestation verify <file> --repo $GH_REPO\`.
           EOF
-          gh release create "$TAG" --verify-tag --title "Filester $VERSION" --notes-file notes.md dist/*
+          gh release create "$TAG" --verify-tag --title "Filester Manager $VERSION" --notes-file notes.md dist/*

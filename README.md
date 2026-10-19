@@ -1,10 +1,12 @@
-# Filester for Linux
+# Filester Manager
 
 A native GTK4 / libadwaita desktop client for the [Filester](https://filester.me)
 cloud storage service, written in Rust.
 
 > **Unofficial.** This project is not affiliated with, endorsed by, or supported
 > by Filester. It talks to the public Filester HTTP API using a key you supply.
+> It is installed as **Filester Manager** so it is not mistaken for an
+> official Filester app. The package and command are `filester-app`.
 
 [![CI](https://github.com/scroguard/filester-app/actions/workflows/ci.yml/badge.svg)](https://github.com/scroguard/filester-app/actions/workflows/ci.yml)
 License: GPL-3.0-or-later
@@ -222,7 +224,7 @@ they need an equally current system. The tarball is built on Ubuntu 24.04,
 the oldest C library (glibc 2.39) in the support matrix, and runs on every
 supported distribution.
 
-The packages pull in GTK 4 and libadwaita automatically and put Filester in
+The packages pull in GTK 4 and libadwaita automatically and put Filester Manager in
 your application menu. Remove them with your package manager as usual
 (`sudo apt remove filester-app`, `sudo dnf remove filester-app`,
 `sudo pacman -R filester-app`).
@@ -241,7 +243,7 @@ and prints the right package command if any are missing.
 
 ### With the installer script
 
-`install.sh` installs Filester and its menu entry and icon. It works from an
+`install.sh` installs Filester Manager and its menu entry and icon. It works from an
 unpacked release tarball (using the bundled binary) or from a source
 checkout (building with cargo first, which needs the
 [build dependencies](#build-dependencies)):

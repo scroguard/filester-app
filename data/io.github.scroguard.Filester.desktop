@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Filester
+Name=Filester Manager
 GenericName=Cloud Storage Client
 Comment=Browse, upload and manage files stored on Filester
 Exec=filester-app

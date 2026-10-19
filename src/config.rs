@@ -9,7 +9,7 @@
 pub const APP_ID: &str = "io.github.scroguard.Filester";
 
 /// Human-readable application name shown in window titles.
-pub const APP_NAME: &str = "Filester";
+pub const APP_NAME: &str = "Filester Manager";
 
 /// Environment variable that controls log verbosity, using `tracing`
 /// `EnvFilter` syntax (for example `FILESTER_LOG=filester_app=debug`).

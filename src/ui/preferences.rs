@@ -175,7 +175,7 @@ struct CacheInputs {
 fn build_cache_group(settings: Settings) -> (adw::PreferencesGroup, CacheInputs) {
     let auto_clean = adw::SwitchRow::builder()
         .title("Remove Old Files Automatically")
-        .subtitle("Checked each time Filester starts")
+        .subtitle("Checked each time Filester Manager starts")
         .active(settings.auto_clean)
         .build();
     let retention = adw::SpinRow::with_range(

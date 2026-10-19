@@ -1364,7 +1364,7 @@ fn build_main_menu() -> gtk::MenuButton {
     let section = gio::Menu::new();
     section.append(Some("_Preferences"), Some("win.preferences"));
     section.append(Some("_Sign Out"), Some("win.sign-out"));
-    section.append(Some("_About Filester"), Some("win.about"));
+    section.append(Some("_About Filester Manager"), Some("win.about"));
     menu.append_section(None, &section);
     gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
