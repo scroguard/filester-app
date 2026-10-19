@@ -200,7 +200,11 @@ jobs:
             FILESTER_SOURCE="git+file://$GITHUB_WORKSPACE#commit=$GITHUB_SHA" \
             bash -c 'cd packaging/arch && makepkg --noconfirm --cleanbuild'
           mkdir -p dist
-          cp packaging/arch/*.pkg.tar.zst dist/
+          # makepkg also emits a -debug split package (debug symbols); only
+          # the application package is published.
+          find packaging/arch -maxdepth 1 -name 'filester-app-*.pkg.tar.zst' \
+            ! -name 'filester-app-debug-*' -exec cp {} dist/ \;
+          test "$(ls dist | wc -l)" -eq 1
       - name: Smoke-test the package
         run: |
           pacman -U --noconfirm dist/*.pkg.tar.zst
