@@ -1,4 +1,5 @@
-//! The application window: sign-in, folder navigation, file grid, uploads.
+//! The application window: sign-in, folder navigation, file grid,
+//! transfers, preferences.
 //!
 //! # Structure
 //!
@@ -10,7 +11,7 @@
 //!          ├─ sidebar: HeaderBar, folder tree, storage gauge
 //!          └─ content: HeaderBar (Up, title, Upload, New Folder, menu)
 //!                      GtkStack "loading" | "grid" | "empty" | "error"
-//!                      upload panel (bottom bar)
+//!                      transfers panel (bottom bar)
 //! ```
 //!
 //! # Threading and state
@@ -20,16 +21,30 @@
 //! signals: values are copied out, the borrow ends, and then widgets are
 //! touched. Each folder load carries a generation number, and results for a
 //! location the user has since left are discarded.
+//!
+//! # Opening files
+//!
+//! With the default [`OpenMode::Browser`], opening a file shows its share
+//! page in the browser. With [`OpenMode::LocalApp`], a public file is
+//! downloaded into the [`FileCache`] (or taken from it) and handed to
+//! `GtkFileLauncher`, which picks the default app through the desktop or
+//! the `OpenURI` portal. Private files, and anything the download route
+//! refuses, fall back to the browser. The cache is pruned at startup
+//! according to the retention setting and emptied on sign-out.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 use adw::prelude::*;
 use filester_app::api::models::{FileEntry, FileQuery, FolderFilter, FolderVisibility};
-use filester_app::api::{ApiError, ApiKey, ClientConfig, FilesterClient, FolderTree};
+use filester_app::api::{
+    ApiError, ApiKey, ClientConfig, DownloadConfig, FilesterClient, FolderTree, PublicDownloader,
+};
+use filester_app::cache::FileCache;
 use filester_app::config;
 use filester_app::secrets::{SecretStoreError, TokenStore};
 use filester_app::worker::Worker;
@@ -39,6 +54,8 @@ use tracing::{debug, info, warn};
 
 use super::file_grid::{FileGrid, GridItem};
 use super::format::{self, describe_error, is_safe_share_url, plain_toast};
+use super::preferences::PreferencesDialog;
+use super::settings::{self, OpenMode, Settings};
 use super::sidebar::Sidebar;
 use super::transfers::TransfersPanel;
 use super::{Location, spawn_ui};
@@ -61,6 +78,7 @@ struct Actions {
     go_up: gio::SimpleAction,
     delete: gio::SimpleAction,
     copy_link: gio::SimpleAction,
+    open: gio::SimpleAction,
     open_link: gio::SimpleAction,
     sign_out: gio::SimpleAction,
 }
@@ -79,12 +97,13 @@ impl Actions {
             go_up: make("go-up"),
             delete: make("delete"),
             copy_link: make("copy-link"),
+            open: make("open"),
             open_link: make("open-link"),
             sign_out: make("sign-out"),
         }
     }
 
-    fn all(&self) -> [&gio::SimpleAction; 8] {
+    fn all(&self) -> [&gio::SimpleAction; 9] {
         [
             &self.upload,
             &self.new_folder,
@@ -92,6 +111,7 @@ impl Actions {
             &self.go_up,
             &self.delete,
             &self.copy_link,
+            &self.open,
             &self.open_link,
             &self.sign_out,
         ]
@@ -134,6 +154,13 @@ pub struct MainWindow {
     worker: Rc<Worker>,
     state: RefCell<State>,
     reload_pending: Cell<bool>,
+    settings: Cell<Settings>,
+    cache: FileCache,
+    /// `None` only if the TLS backend failed to start; opening then falls
+    /// back to the browser.
+    downloader: Option<PublicDownloader>,
+    /// The open Preferences dialog, so cache work can update it.
+    preferences: RefCell<Option<Rc<PreferencesDialog>>>,
 }
 
 /// Run `f` if the window is still alive.
@@ -202,6 +229,11 @@ impl MainWindow {
             window.add_breakpoint(breakpoint);
         }
 
+        let downloader = DownloadConfig::production()
+            .and_then(PublicDownloader::new)
+            .inspect_err(|err| warn!(error = %err, "downloads unavailable"))
+            .ok();
+
         let this = Rc::new(Self {
             window,
             toasts,
@@ -218,6 +250,10 @@ impl MainWindow {
             worker,
             state: RefCell::new(State::default()),
             reload_pending: Cell::new(false),
+            settings: Cell::new(Settings::load(&settings::settings_path())),
+            cache: FileCache::new(settings::cache_dir()),
+            downloader,
+            preferences: RefCell::new(None),
         });
         this.connect_actions();
         this.connect_signals();
@@ -229,10 +265,11 @@ impl MainWindow {
         self.window.present();
     }
 
-    /// Show the window and try the stored API key.
+    /// Show the window, prune the download cache, and try the stored API key.
     pub fn start(self: &Rc<Self>) {
         self.pages.set_visible_child_name("loading");
         self.window.present();
+        self.prune_cache();
         debug!("looking up stored API key");
         let weak = Rc::downgrade(self);
         spawn_ui(
@@ -273,13 +310,20 @@ impl MainWindow {
         bind(&self.actions.go_up, Self::go_up);
         bind(&self.actions.delete, Self::confirm_delete);
         bind(&self.actions.copy_link, Self::copy_link);
+        bind(&self.actions.open, Self::open_file);
         bind(&self.actions.open_link, Self::open_link);
         bind(&self.actions.sign_out, |this| this.sign_out(None));
 
-        let about = gio::SimpleAction::new("about", None);
-        let weak = Rc::downgrade(self);
-        about.connect_activate(move |_, _| with(&weak, Self::show_about));
-        self.window.add_action(&about);
+        // Always available, signed in or not.
+        for (name, f) in [
+            ("about", Self::show_about as fn(&Rc<Self>)),
+            ("preferences", Self::show_preferences),
+        ] {
+            let action = gio::SimpleAction::new(name, None);
+            let weak = Rc::downgrade(self);
+            action.connect_activate(move |_, _| with(&weak, f));
+            self.window.add_action(&action);
+        }
 
         // Item shortcuts apply only while the grid has focus, so Delete in a
         // text entry can never trigger a deletion.
@@ -317,7 +361,7 @@ impl MainWindow {
         self.grid.connect_activate(move |item| {
             with(&weak, |this| match item {
                 GridItem::Folder(folder) => this.navigate(Location::Folder(folder.id)),
-                GridItem::File(_) => this.open_link(),
+                GridItem::File(_) => this.open_file(),
             });
         });
         let weak = Rc::downgrade(self);
@@ -340,7 +384,7 @@ impl MainWindow {
         });
         self.content.add_controller(drop);
 
-        // Closing with active uploads asks first.
+        // Closing with active transfers asks first.
         let weak = Rc::downgrade(self);
         self.window.connect_close_request(move |_| {
             let Some(this) = weak.upgrade() else {
@@ -415,9 +459,17 @@ impl MainWindow {
         );
     }
 
-    /// Return to the sign-in page, cancel uploads, and remove the stored key.
+    /// Return to the sign-in page, cancel transfers, empty the download
+    /// cache, and remove the stored key.
     fn sign_out(self: &Rc<Self>, message: Option<&str>) {
         self.transfers.abort_all();
+        self.with_cache(FileCache::purge, |this, result| match result {
+            Ok(report) => debug!(files = report.files_removed, "download cache emptied"),
+            Err(err) => {
+                warn!(error = %err, "could not empty the download cache");
+                this.toast("Couldn't empty the download cache");
+            }
+        });
         {
             let mut state = self.state.borrow_mut();
             state.client = None;
@@ -616,7 +668,7 @@ impl MainWindow {
         let folder = self.state.borrow().location.folder_id().cloned();
         for path in paths {
             let weak = Rc::downgrade(self);
-            self.transfers.enqueue(
+            self.transfers.enqueue_upload(
                 &self.worker,
                 client.clone(),
                 path,
@@ -770,11 +822,15 @@ impl MainWindow {
     }
 
     fn open_link(self: &Rc<Self>) {
-        let Some(url) = self.selected_share_url() else {
-            return;
-        };
+        if let Some(url) = self.selected_share_url() {
+            self.open_url(&url);
+        }
+    }
+
+    /// Open a validated share URL in the browser.
+    fn open_url(self: &Rc<Self>, url: &str) {
         let weak = Rc::downgrade(self);
-        gtk::UriLauncher::new(&url).launch(
+        gtk::UriLauncher::new(url).launch(
             Some(&self.window),
             None::<&gio::Cancellable>,
             move |result| {
@@ -788,14 +844,222 @@ impl MainWindow {
         );
     }
 
+    /// Open the selected file as the preferences say: in the browser, or
+    /// (for public files) in the default local app.
+    fn open_file(self: &Rc<Self>) {
+        let Some(url) = self.selected_share_url() else {
+            return;
+        };
+        if self.settings.get().open_mode == OpenMode::Browser {
+            self.open_url(&url);
+            return;
+        }
+        let Some(GridItem::File(file)) = self.grid.selected() else {
+            return;
+        };
+        let (Some(slug), Some(downloader)) = (file.share_slug(), self.downloader.clone()) else {
+            self.open_url(&url);
+            return;
+        };
+        if self.location_is_private() {
+            self.toast("Private files open in the browser");
+            self.open_url(&url);
+            return;
+        }
+
+        let (name, size) = (file.name, file.size);
+        let (lookup_slug, lookup_name) = (slug.clone(), name.clone());
+        self.with_cache(
+            move |cache| Ok(cache.lookup(&lookup_slug, &lookup_name, size)),
+            move |this, cached| match cached {
+                Ok(Some(path)) => this.launch_local(&path, &name),
+                _ => this.download_and_open(downloader, slug, name, size, url),
+            },
+        );
+    }
+
+    fn download_and_open(
+        self: &Rc<Self>,
+        downloader: PublicDownloader,
+        slug: String,
+        name: String,
+        size: u64,
+        url: String,
+    ) {
+        let weak = Rc::downgrade(self);
+        let display_name = name.clone();
+        self.transfers.enqueue_download(
+            &self.worker,
+            downloader,
+            self.cache.clone(),
+            slug,
+            name,
+            size,
+            move |outcome| {
+                with(&weak, |this| match outcome {
+                    Ok(Ok(path)) => this.launch_local(&path, &display_name),
+                    Ok(Err(ApiError::NotPublic)) => {
+                        this.toast("This file is private, so it opens in the browser");
+                        this.open_url(&url);
+                    }
+                    // Not report_error: a 401 from the download route says
+                    // nothing about the API key, so it must not sign out.
+                    Ok(Err(err)) => {
+                        warn!(error = %err, "download failed");
+                        this.toast(&describe_error(&err));
+                    }
+                    Err(_cancelled) => {}
+                });
+            },
+        );
+    }
+
+    /// Hand a cached file to the desktop's default app for its type.
+    fn launch_local(self: &Rc<Self>, path: &Path, name: &str) {
+        let weak = Rc::downgrade(self);
+        let name = name.to_owned();
+        gtk::FileLauncher::new(Some(&gio::File::for_path(path))).launch(
+            Some(&self.window),
+            None::<&gio::Cancellable>,
+            move |result| {
+                if let Err(err) = result
+                    && !err.matches(gtk::DialogError::Dismissed)
+                {
+                    warn!(error = %err, "could not launch a local app");
+                    with(&weak, |this| {
+                        this.toast(&format!("No app could open “{name}”"));
+                    });
+                }
+            },
+        );
+    }
+
+    /// Whether the current folder, or any folder above it, is private. Files
+    /// inherit privacy from their ancestors, so the public download route
+    /// would refuse them anyway.
+    fn location_is_private(&self) -> bool {
+        let state = self.state.borrow();
+        match &state.location {
+            Location::Root => false,
+            Location::Folder(id) => state.tree.path_to(id).iter().any(|f| !f.public),
+        }
+    }
+
+    // --- Preferences & cache --------------------------------------------------------
+
+    fn show_preferences(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        let weak_clear = weak.clone();
+        let dialog = Rc::new(PreferencesDialog::new(
+            self.settings.get(),
+            move |settings| with(&weak, |this| this.apply_settings(settings)),
+            move || with(&weak_clear, Self::clear_cache),
+        ));
+        dialog.present(&self.window);
+        *self.preferences.borrow_mut() = Some(dialog);
+        self.update_cache_usage();
+    }
+
+    /// Adopt and save new settings. Retention takes effect at the next
+    /// start, so adjusting the number never deletes files mid-edit.
+    fn apply_settings(self: &Rc<Self>, settings: Settings) {
+        if self.settings.replace(settings) == settings {
+            return;
+        }
+        let data = settings.to_data();
+        let weak = Rc::downgrade(self);
+        spawn_ui(
+            &self.worker,
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    settings::write_atomically(&settings::settings_path(), &data)
+                })
+                .await
+                .map_err(|e| io::Error::other(e.to_string()))?
+            },
+            move |result| {
+                if let Ok(Err(err)) = result {
+                    warn!(error = %err, "could not save settings");
+                    with(&weak, |this| this.toast("Couldn't save preferences"));
+                }
+            },
+        );
+    }
+
+    /// Startup cleanup: always drop abandoned partial downloads, and drop
+    /// files not opened within the retention period if that is enabled.
+    fn prune_cache(self: &Rc<Self>) {
+        let retention = self.settings.get().retention();
+        self.with_cache(
+            move |cache| cache.prune(retention),
+            |_, result| match result {
+                Ok(report) if report.files_removed > 0 => info!(
+                    files = report.files_removed,
+                    bytes = report.bytes_freed,
+                    "removed old downloads from the cache"
+                ),
+                Ok(_) => {}
+                Err(err) => warn!(error = %err, "download cache cleanup failed"),
+            },
+        );
+    }
+
+    fn clear_cache(self: &Rc<Self>) {
+        self.with_cache(FileCache::clear, |this, result| {
+            match result {
+                Ok(report) => this.toast(&format!(
+                    "Removed {} downloaded file{}",
+                    report.files_removed,
+                    if report.files_removed == 1 { "" } else { "s" }
+                )),
+                Err(err) => {
+                    warn!(error = %err, "could not clear the download cache");
+                    this.toast("Couldn't clear the download cache");
+                }
+            }
+            this.update_cache_usage();
+        });
+    }
+
+    fn update_cache_usage(self: &Rc<Self>) {
+        self.with_cache(FileCache::usage, |this, result| {
+            if let Some(dialog) = this.preferences.borrow().as_ref() {
+                dialog.set_cache_usage(result.ok());
+            }
+        });
+    }
+
+    /// Run blocking cache work on the worker, then `done` on the GTK thread.
+    fn with_cache<T: Send + 'static>(
+        self: &Rc<Self>,
+        work: impl FnOnce(&FileCache) -> io::Result<T> + Send + 'static,
+        done: impl FnOnce(&Rc<Self>, io::Result<T>) + 'static,
+    ) {
+        let cache = self.cache.clone();
+        let weak = Rc::downgrade(self);
+        spawn_ui(
+            &self.worker,
+            async move {
+                tokio::task::spawn_blocking(move || work(&cache))
+                    .await
+                    .map_err(|e| io::Error::other(e.to_string()))?
+            },
+            move |result| {
+                if let Ok(result) = result {
+                    with(&weak, |this| done(this, result));
+                }
+            },
+        );
+    }
+
     // --- Dialogs ------------------------------------------------------------------
 
     fn confirm_close(self: &Rc<Self>) {
         let dialog = adw::AlertDialog::new(
-            Some("Cancel Uploads?"),
-            Some("Uploads in progress will be cancelled if you quit now."),
+            Some("Cancel Transfers?"),
+            Some("Uploads and downloads in progress will be cancelled if you quit now."),
         );
-        dialog.add_response("cancel", "_Keep Uploading");
+        dialog.add_response("cancel", "_Keep Going");
         dialog.add_response("quit", "_Quit");
         dialog.set_response_appearance("quit", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("cancel"));
@@ -901,6 +1165,7 @@ impl MainWindow {
         let has_link = self.selected_share_url().is_some();
         self.actions.delete.set_enabled(signed_in && has_selection);
         self.actions.copy_link.set_enabled(signed_in && has_link);
+        self.actions.open.set_enabled(signed_in && has_link);
         self.actions.open_link.set_enabled(signed_in && has_link);
     }
 }
@@ -1097,6 +1362,7 @@ fn build_main_menu() -> gtk::MenuButton {
     section.append(Some("_Refresh"), Some("win.refresh"));
     menu.append_section(None, &section);
     let section = gio::Menu::new();
+    section.append(Some("_Preferences"), Some("win.preferences"));
     section.append(Some("_Sign Out"), Some("win.sign-out"));
     section.append(Some("_About Filester"), Some("win.about"));
     menu.append_section(None, &section);
@@ -1111,7 +1377,8 @@ fn build_main_menu() -> gtk::MenuButton {
 fn build_item_menu() -> gio::Menu {
     let menu = gio::Menu::new();
     let section = gio::Menu::new();
-    section.append(Some("_Open in Browser"), Some("win.open-link"));
+    section.append(Some("_Open"), Some("win.open"));
+    section.append(Some("Open in _Browser"), Some("win.open-link"));
     section.append(Some("_Copy Link"), Some("win.copy-link"));
     menu.append_section(None, &section);
     let section = gio::Menu::new();

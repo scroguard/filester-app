@@ -41,7 +41,7 @@ const CHUNK_SIZE: usize = 256 * 1024;
 
 /// Minimum bytes between progress callbacks, which bounds UI traffic to about
 /// 10 000 events for a 10 GiB file.
-const PROGRESS_STEP: u64 = 1024 * 1024;
+pub(crate) const PROGRESS_STEP: u64 = 1024 * 1024;
 
 /// Longest file name sent in the multipart header, in bytes.
 const MAX_FILE_NAME_BYTES: usize = 255;

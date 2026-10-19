@@ -1,19 +1,24 @@
-//! Upload queue with per-file progress bars.
+//! Upload and download queue with per-file progress bars.
 //!
-//! At most [`MAX_CONCURRENT_UPLOADS`] uploads run at once, enforced by a
-//! semaphore on the worker side. Queued uploads hold no file handle and use
-//! no bandwidth. Each row shows a live progress bar fed by a lossy channel
-//! (see [`filester_app::worker::progress_channel`]), and its cancel button
-//! aborts the task, which drops the HTTP request.
+//! At most [`MAX_CONCURRENT`] uploads, and separately at most
+//! [`MAX_CONCURRENT`] downloads, run at once, enforced by semaphores on the
+//! worker side. Queued transfers hold no file handle and use no bandwidth.
+//! Each row shows a live progress bar fed by a lossy channel (see
+//! [`filester_app::worker::progress_channel`]), and its cancel button aborts
+//! the task, which drops the HTTP request.
 
 use std::cell::{Cell, RefCell};
+use std::future::Future;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
-use filester_app::api::models::{FolderId, UploadResult};
-use filester_app::api::{ApiError, FilesterClient, TransferProgress};
+use filester_app::api::models::FolderId;
+use filester_app::api::{
+    ApiError, FilesterClient, ProgressCallback, PublicDownloader, TransferProgress,
+};
+use filester_app::cache::FileCache;
 use filester_app::worker::{TaskCancelled, Worker, progress_channel};
 use gtk::glib;
 use tokio::sync::Semaphore;
@@ -21,9 +26,9 @@ use tokio::task::AbortHandle;
 
 use super::{format, spawn_ui};
 
-/// Parallel uploads. More rarely helps throughput, and each upload costs
-/// part of the hourly request budget.
-const MAX_CONCURRENT_UPLOADS: usize = 2;
+/// Parallel transfers per direction. More rarely helps throughput, and each
+/// upload costs part of the hourly request budget.
+const MAX_CONCURRENT: usize = 2;
 /// Progress events buffered per upload before intermediate ones are dropped.
 const PROGRESS_BUFFER: usize = 16;
 
@@ -38,7 +43,7 @@ struct Transfer {
 }
 
 impl Transfer {
-    fn new(name: &str) -> Self {
+    fn new(name: &str, cancel_tooltip: &str) -> Self {
         let title = gtk::Label::builder()
             .xalign(0.0)
             .hexpand(true)
@@ -48,7 +53,7 @@ impl Transfer {
         title.set_tooltip_text(Some(name));
         let cancel = gtk::Button::builder()
             .icon_name("process-stop-symbolic")
-            .tooltip_text("Cancel Upload")
+            .tooltip_text(cancel_tooltip)
             .valign(gtk::Align::Center)
             .build();
         cancel.add_css_class("flat");
@@ -105,13 +110,13 @@ impl Transfer {
         ));
     }
 
-    fn finish(&self, outcome: &Result<Result<UploadResult, ApiError>, TaskCancelled>) {
+    fn finish<T>(&self, outcome: &Result<Result<T, ApiError>, TaskCancelled>, done: &str) {
         self.finished.set(true);
         self.cancel.set_visible(false);
         match outcome {
             Ok(Ok(_)) => {
                 self.bar.set_fraction(1.0);
-                self.status.set_text("Uploaded");
+                self.status.set_text(done);
             }
             Ok(Err(err)) => {
                 let text = format::describe_error(err);
@@ -131,18 +136,34 @@ impl Transfer {
     }
 }
 
-/// Collapsible panel listing uploads.
+/// Collapsible panel listing uploads and downloads.
 pub struct TransfersPanel {
     revealer: gtk::Revealer,
     list: gtk::ListBox,
     transfers: RefCell<Vec<Rc<Transfer>>>,
-    queue: Arc<Semaphore>,
+    uploads: Arc<Semaphore>,
+    downloads: Arc<Semaphore>,
 }
+
+/// Labels for one kind of transfer.
+struct Kind {
+    cancel_tooltip: &'static str,
+    done: &'static str,
+}
+
+const UPLOAD: Kind = Kind {
+    cancel_tooltip: "Cancel Upload",
+    done: "Uploaded",
+};
+const DOWNLOAD: Kind = Kind {
+    cancel_tooltip: "Cancel Download",
+    done: "Downloaded",
+};
 
 impl TransfersPanel {
     pub fn new() -> Rc<Self> {
         let heading = gtk::Label::builder()
-            .label("Uploads")
+            .label("Transfers")
             .xalign(0.0)
             .hexpand(true)
             .build();
@@ -182,7 +203,8 @@ impl TransfersPanel {
             revealer,
             list,
             transfers: RefCell::new(Vec::new()),
-            queue: Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS)),
+            uploads: Arc::new(Semaphore::new(MAX_CONCURRENT)),
+            downloads: Arc::new(Semaphore::new(MAX_CONCURRENT)),
         });
         let weak = Rc::downgrade(&panel);
         clear.connect_clicked(move |_| {
@@ -200,7 +222,7 @@ impl TransfersPanel {
 
     /// Queue `path` for upload into `folder`. `on_done(true)` runs on the
     /// main thread after a successful upload, `on_done(false)` otherwise.
-    pub fn enqueue(
+    pub fn enqueue_upload(
         self: &Rc<Self>,
         worker: &Worker,
         client: FilesterClient,
@@ -212,13 +234,65 @@ impl TransfersPanel {
             || path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        let transfer = Rc::new(Transfer::new(&name));
+        self.run(
+            worker,
+            &name,
+            &UPLOAD,
+            Arc::clone(&self.uploads),
+            move |progress| async move { client.upload(&path, folder.as_ref(), Some(progress)).await },
+            move |outcome| on_done(matches!(outcome, Ok(Ok(_)))),
+        );
+    }
+
+    /// Queue a download of the public file `slug` into `cache`. `on_done`
+    /// receives the cached path, the error, or `Err(TaskCancelled)`.
+    #[allow(clippy::too_many_arguments)] // all distinct, all required
+    pub fn enqueue_download(
+        self: &Rc<Self>,
+        worker: &Worker,
+        downloader: PublicDownloader,
+        cache: FileCache,
+        slug: String,
+        name: String,
+        size: u64,
+        on_done: impl FnOnce(Result<Result<PathBuf, ApiError>, TaskCancelled>) + 'static,
+    ) {
+        let label = name.clone();
+        self.run(
+            worker,
+            &label,
+            &DOWNLOAD,
+            Arc::clone(&self.downloads),
+            move |progress| async move {
+                cache
+                    .fetch(&downloader, &slug, &name, size, Some(progress))
+                    .await
+            },
+            on_done,
+        );
+    }
+
+    /// Add a row for `name` and run `work` on the worker once `queue` has a
+    /// free slot.
+    fn run<T, W, Fut>(
+        self: &Rc<Self>,
+        worker: &Worker,
+        name: &str,
+        kind: &'static Kind,
+        queue: Arc<Semaphore>,
+        work: W,
+        on_done: impl FnOnce(Result<Result<T, ApiError>, TaskCancelled>) + 'static,
+    ) where
+        T: Send + 'static,
+        W: FnOnce(ProgressCallback) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, ApiError>> + Send,
+    {
+        let transfer = Rc::new(Transfer::new(name, kind.cancel_tooltip));
         self.list.append(&transfer.row);
         self.transfers.borrow_mut().push(Rc::clone(&transfer));
         self.revealer.set_reveal_child(true);
 
         let (callback, progress_rx) = progress_channel(PROGRESS_BUFFER);
-        let queue = Arc::clone(&self.queue);
         let done_transfer = Rc::clone(&transfer);
         let abort = spawn_ui(
             worker,
@@ -226,12 +300,11 @@ impl TransfersPanel {
                 // The semaphore is never closed, so `acquire` cannot fail. If
                 // it somehow did, proceeding unthrottled is the safe fallback.
                 let _permit = queue.acquire_owned().await.ok();
-                client.upload(&path, folder.as_ref(), Some(callback)).await
+                work(callback).await
             },
             move |outcome| {
-                let ok = matches!(outcome, Ok(Ok(_)));
-                done_transfer.finish(&outcome);
-                on_done(ok);
+                done_transfer.finish(&outcome, kind.done);
+                on_done(outcome);
             },
         );
         *transfer.abort.borrow_mut() = Some(abort);
@@ -243,7 +316,7 @@ impl TransfersPanel {
             }
         });
 
-        // Ends when the upload future drops its callback (finished, failed or
+        // Ends when the work future drops its callback (finished, failed or
         // aborted), which closes the channel.
         let progress_transfer = Rc::clone(&transfer);
         glib::spawn_future_local(async move {
@@ -253,7 +326,7 @@ impl TransfersPanel {
         });
     }
 
-    /// Number of uploads not yet finished.
+    /// Number of transfers not yet finished.
     pub fn active_count(&self) -> usize {
         self.transfers
             .borrow()
@@ -262,7 +335,7 @@ impl TransfersPanel {
             .count()
     }
 
-    /// Cancel every unfinished upload.
+    /// Cancel every unfinished transfer.
     pub fn abort_all(&self) {
         for transfer in self.transfers.borrow().iter() {
             if !transfer.finished.get() {

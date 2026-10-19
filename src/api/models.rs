@@ -10,11 +10,27 @@
 //!   level.
 //!
 //! Server-supplied names and URLs are untrusted. The UI must render them as
-//! plain text, and they are never used to build local filesystem paths.
+//! plain text. The only place a server name reaches the filesystem is the
+//! download cache, and only after [`crate::cache::safe_file_name`].
 
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use url::Url;
+
+/// Longest share slug accepted. Observed slugs are 7 characters.
+const MAX_SLUG_LEN: usize = 64;
+
+/// Whether `slug` looks like a share slug: 1 to 64 ASCII letters, digits,
+/// `-` or `_`. Slugs name cache directories, so this rules out `.`, `/` and
+/// anything else with filesystem meaning.
+#[must_use]
+pub fn is_valid_slug(slug: &str) -> bool {
+    (1..=MAX_SLUG_LEN).contains(&slug.len())
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
 
 /// Opaque folder identifier assigned by the server, for example
 /// `"a1b2c3d4e5f6g7h8"`.
@@ -150,6 +166,26 @@ impl FileEntry {
             .clone()
             .or_else(|| self.uuid.clone())
             .unwrap_or_else(|| self.id.to_string())
+    }
+
+    /// The public share slug: the `slug` field when present, otherwise the
+    /// last segment of a `https://filester.me/d/<slug>` share URL. Folder and
+    /// root listings omit `slug`, but always include `url`.
+    #[must_use]
+    pub fn share_slug(&self) -> Option<String> {
+        if let Some(slug) = self.slug.as_deref().filter(|s| is_valid_slug(s)) {
+            return Some(slug.to_owned());
+        }
+        let url = Url::parse(self.url.as_deref()?).ok()?;
+        let host = url.host_str()?;
+        if url.scheme() != "https" || !(host == "filester.me" || host.ends_with(".filester.me")) {
+            return None;
+        }
+        let mut segments = url.path_segments()?;
+        match (segments.next(), segments.next(), segments.next()) {
+            (Some("d"), Some(slug), None) if is_valid_slug(slug) => Some(slug.to_owned()),
+            _ => None,
+        }
     }
 }
 
@@ -532,6 +568,52 @@ fn folder_ref<'de, D: Deserializer<'de>>(d: D) -> Result<Option<FolderId>, D::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn file_with(slug: Option<&str>, url: Option<&str>) -> FileEntry {
+        FileEntry {
+            id: 1,
+            uuid: None,
+            slug: slug.map(str::to_owned),
+            name: "a.txt".to_owned(),
+            size: 1,
+            mime_type: None,
+            url: url.map(str::to_owned),
+            folder_id: None,
+            created_at: None,
+            downloads: None,
+            views: None,
+            has_thumbnail: None,
+        }
+    }
+
+    #[test]
+    fn slug_validation() {
+        assert!(is_valid_slug("aBcDeFg"));
+        assert!(is_valid_slug("a-b_c9"));
+        for bad in ["", ".", "..", "a/b", "a b", "a.b", "é", &"x".repeat(65)] {
+            assert!(!is_valid_slug(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn share_slug_prefers_field_then_parses_url() {
+        let f = file_with(Some("Slug123"), Some("https://filester.me/d/Other"));
+        assert_eq!(f.share_slug().as_deref(), Some("Slug123"));
+        let f = file_with(None, Some("https://filester.me/d/cUxkqEh"));
+        assert_eq!(f.share_slug().as_deref(), Some("cUxkqEh"));
+        for url in [
+            "http://filester.me/d/abc",
+            "https://evil.example/d/abc",
+            "https://filester.me.evil.example/d/abc",
+            "https://filester.me/x/abc",
+            "https://filester.me/d/abc/extra",
+            "https://filester.me/d/..",
+            "https://filester.me/d/",
+        ] {
+            assert_eq!(file_with(None, Some(url)).share_slug(), None, "{url}");
+        }
+        assert_eq!(file_with(Some("../x"), None).share_slug(), None);
+    }
 
     #[test]
     fn folder_parses_documented_example_and_merges_parent_alias() {

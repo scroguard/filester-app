@@ -132,11 +132,7 @@ impl ClientConfig {
 
 fn validate_base_url(raw: &str) -> Result<Url> {
     let url = Url::parse(raw).map_err(|e| ApiError::Config(format!("invalid base URL: {e}")))?;
-    let loopback = match url.host() {
-        Some(Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
-        Some(Host::Ipv6(ip)) => IpAddr::V6(ip).is_loopback(),
-        _ => false,
-    };
+    let loopback = is_loopback_ip(&url);
     match url.scheme() {
         "https" => {}
         "http" if loopback => {}
@@ -164,6 +160,16 @@ fn validate_base_url(raw: &str) -> Result<Url> {
         return Err(ApiError::Config("base URL must not have a path".to_owned()));
     }
     Ok(url)
+}
+
+/// Whether the URL's host is a literal loopback IP address. Host names such
+/// as `localhost` do not count, because they go through DNS.
+pub(super) fn is_loopback_ip(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
+        Some(Host::Ipv6(ip)) => IpAddr::V6(ip).is_loopback(),
+        _ => false,
+    }
 }
 
 /// The `pagination` sibling of `data` in `GET /api/v1/files`.
@@ -794,40 +800,10 @@ impl FilesterClient {
     /// Map non-2xx responses to errors. On success, read the body under the
     /// size cap.
     async fn checked_body(&self, resp: Response) -> Result<Vec<u8>> {
-        let status = resp.status();
-        if status.is_success() {
+        if resp.status().is_success() {
             return read_capped(resp, self.inner.config.max_response_bytes).await;
         }
-        let retry_after = resp
-            .headers()
-            .get(RETRY_AFTER)
-            .and_then(|v| parse_retry_after(v, SystemTime::now()));
-        let body = read_capped(resp, MAX_ERROR_BODY_BYTES)
-            .await
-            .unwrap_or_default();
-        let env: Option<Envelope<serde_json::Value>> = serde_json::from_slice(&body).ok();
-        let message = env
-            .and_then(|e| e.message)
-            .map(|m| sanitize_server_text(&m))
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| status.canonical_reason().unwrap_or("no message").to_owned());
-        Err(match status {
-            StatusCode::UNAUTHORIZED => ApiError::Unauthorized,
-            StatusCode::FORBIDDEN => ApiError::Forbidden { message },
-            StatusCode::NOT_FOUND => ApiError::NotFound { message },
-            StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => {
-                ApiError::BadRequest { message }
-            }
-            StatusCode::TOO_MANY_REQUESTS => ApiError::RateLimited { retry_after },
-            s if s.is_server_error() => ApiError::Server {
-                status: s.as_u16(),
-                message,
-            },
-            s => ApiError::UnexpectedStatus {
-                status: s.as_u16(),
-                message,
-            },
-        })
+        Err(error_from_response(resp).await)
     }
 
     async fn decode_envelope<T: DeserializeOwned>(&self, resp: Response) -> Result<Envelope<T>> {
@@ -850,8 +826,44 @@ impl FilesterClient {
     }
 }
 
+/// Map a non-2xx response to an [`ApiError`], using the (capped, sanitised)
+/// envelope message when the body has one.
+pub(super) async fn error_from_response(resp: Response) -> ApiError {
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|v| parse_retry_after(v, SystemTime::now()));
+    let body = read_capped(resp, MAX_ERROR_BODY_BYTES)
+        .await
+        .unwrap_or_default();
+    let env: Option<Envelope<serde_json::Value>> = serde_json::from_slice(&body).ok();
+    let message = env
+        .and_then(|e| e.message)
+        .map(|m| sanitize_server_text(&m))
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| status.canonical_reason().unwrap_or("no message").to_owned());
+    match status {
+        StatusCode::UNAUTHORIZED => ApiError::Unauthorized,
+        StatusCode::FORBIDDEN => ApiError::Forbidden { message },
+        StatusCode::NOT_FOUND => ApiError::NotFound { message },
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => {
+            ApiError::BadRequest { message }
+        }
+        StatusCode::TOO_MANY_REQUESTS => ApiError::RateLimited { retry_after },
+        s if s.is_server_error() => ApiError::Server {
+            status: s.as_u16(),
+            message,
+        },
+        s => ApiError::UnexpectedStatus {
+            status: s.as_u16(),
+            message,
+        },
+    }
+}
+
 /// Read a body, refusing to buffer more than `limit` bytes.
-async fn read_capped(mut resp: Response, limit: usize) -> Result<Vec<u8>> {
+pub(super) async fn read_capped(mut resp: Response, limit: usize) -> Result<Vec<u8>> {
     if resp.content_length().is_some_and(|len| len > limit as u64) {
         return Err(ApiError::ResponseTooLarge { limit });
     }
@@ -865,7 +877,7 @@ async fn read_capped(mut resp: Response, limit: usize) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+pub(super) fn decode_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes)
         .map_err(|e| ApiError::Decode(sanitize_server_text(&e.to_string())))
 }

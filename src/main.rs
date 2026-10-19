@@ -93,4 +93,5 @@ fn register_app_actions(app: &adw::Application) {
     app.set_accels_for_action("win.new-folder", &["<Control><Shift>n"]);
     app.set_accels_for_action("win.refresh", &["F5", "<Control>r"]);
     app.set_accels_for_action("win.go-up", &["<Alt>Up"]);
+    app.set_accels_for_action("win.preferences", &["<Control>comma"]);
 }

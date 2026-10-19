@@ -18,6 +18,7 @@ License: GPL-3.0-or-later
 | 1 | Repository layout, build configuration, CI, desktop metadata, application shell | **Done** |
 | 2 | API engine: async HTTP, token storage, rate limiting/backoff, streamed multipart uploads, folder-tree reconstruction, unit tests | **Done** |
 | 3 | Main window: sidebar navigation, file/folder grid, transfer progress, event handling | **Done** |
+| — | Open public files in local apps, Preferences, download-cache cleanup | **Done** |
 
 ## Features
 
@@ -26,11 +27,19 @@ License: GPL-3.0-or-later
 - Sidebar folder tree, rebuilt from parent links. It repairs orphaned or
   cyclic folders instead of hiding them.
 - Icon grid of subfolders and files. Double-click a folder to open it, or a
-  file to open its share page in the browser. Breadcrumbs appear in the
-  header.
-- Uploads from the Upload button or by drag-and-drop. Two run at a time, the
-  rest queue, and each has a progress bar and a cancel button. Closing the
-  window with uploads in progress asks first.
+  file to open it. Breadcrumbs appear in the header.
+- Opening a file shows its share page in the browser by default. In
+  Preferences you can choose **Open in Default App** instead: public files
+  are then downloaded to a local cache and opened with the app registered
+  for their type. Private files always open in the browser (see
+  [Downloads and the local cache](#downloads-and-the-local-cache)).
+- Optional automatic cleanup of the download cache: at every start, files
+  not opened for a chosen number of days (default 7) are removed. The cache
+  size and a Clear button are in Preferences, and signing out empties it.
+- Uploads from the Upload button or by drag-and-drop, and downloads for
+  opening locally. Two of each run at a time, the rest queue, and each has a
+  progress bar and a cancel button. Closing the window with transfers in
+  progress asks first.
 - New folder (private by default), delete with confirmation, copy share link.
 - Storage usage gauge.
 - Adaptive layout that collapses to a single pane on narrow windows.
@@ -46,6 +55,7 @@ License: GPL-3.0-or-later
 | <kbd>Enter</kbd> | Open selected item |
 | <kbd>Delete</kbd> | Delete selected item (file grid focused) |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy share link (file grid focused) |
+| <kbd>Ctrl</kbd>+<kbd>,</kbd> | Preferences |
 | <kbd>Ctrl</kbd>+<kbd>W</kbd> / <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Close / quit |
 
 Delete and Ctrl+C are bound only to the file grid, so they can never fire
@@ -80,16 +90,18 @@ filester-app/
 ├── src/
 │   ├── main.rs                   # binary: logging + GApplication (all GTK code)
 │   ├── lib.rs                    # library root: everything testable headlessly
-│   ├── config.rs                 # app ID, API origin, User-Agent
+│   ├── config.rs                 # app ID, API origin, download route + host allowlist, User-Agent
 │   ├── api/                      # REST engine — no GTK imports allowed here
 │   │   ├── mod.rs                #   public facade and re-exports
 │   │   ├── auth.rs               #   ApiKey: validation, redaction, sensitive header
 │   │   ├── client.rs             #   FilesterClient: endpoints, retries, redirects, size caps
 │   │   ├── rate_limit.rs         #   X-RateLimit-* tracking, 429 + Retry-After backoff
 │   │   ├── upload.rs             #   streamed multipart body, progress, stall watchdog
+│   │   ├── download.rs           #   public-file downloads (keyless, host allowlist, size checks)
 │   │   ├── models.rs             #   serde wire types (lenient decoding)
 │   │   ├── tree.rs               #   folder hierarchy from parent-ID links, anomaly repair
 │   │   └── error.rs              #   ApiError, server-text sanitising
+│   ├── cache.rs                  # download cache: safe names, 0700/0600, age-based cleanup
 │   ├── secrets.rs                # Secret Service / portal token store (oo7)
 │   ├── worker.rs                 # tokio runtime ↔ GTK bridge (oneshot + async-channel)
 │   └── ui/                       # GTK front end (binary only)
@@ -97,9 +109,13 @@ filester-app/
 │       ├── window.rs             #   window, sign-in, navigation, actions, dialogs
 │       ├── sidebar.rs            #   TreeListModel folder tree + storage gauge
 │       ├── file_grid.rs          #   GridView tiles + context menu
-│       ├── transfers.rs          #   upload queue with progress bars
+│       ├── transfers.rs          #   upload/download queue with progress bars
+│       ├── preferences.rs        #   Preferences dialog (open mode, cache retention)
+│       ├── settings.rs           #   settings.ini load/save, XDG paths
 │       └── format.rs             #   error text, share-URL validation, markup safety
 ├── tests/api_client.rs           # end-to-end client tests against a wiremock server
+├── tests/download.rs             # download + cache tests (incl. "no Authorization header")
+├── tests/keyring_live.rs         # manual, read-only check against the real keyring
 ├── Cargo.toml                    # dependencies, lint policy, release profile
 ├── Cargo.lock                    # committed: pinned, auditable dependency graph
 ├── clippy.toml / rustfmt.toml / rust-toolchain.toml
@@ -242,6 +258,24 @@ POST requests are never retried after the server may have processed them.
 A 429 means the request was rejected up front, and a connect failure means
 it never left the machine.
 
+### Outside the documented API: public downloads
+
+The API has no download endpoint. For **Open in Default App**,
+`PublicDownloader` (`src/api/download.rs`) uses the route the website's
+share page uses:
+
+| Request | Purpose |
+|---------|---------|
+| `POST https://filester.me/v2/api/public/download` `{"file_slug": …}` | short-lived token, file key, and the server holding the bytes |
+| `GET https://<server>/v2/<file>?token=…&download=true` | the file contents |
+
+This route is undocumented and may change without notice. It works for
+public files only. A file is private if it, or any folder above it, is
+private. The route refuses private files with HTTP 403 even when the API key
+is supplied (tested October 2026), so private files cannot be opened locally.
+Observed servers are `*.cdn.cr` (with `*.filester.me` mirrors as the site's
+fallback).
+
 ## Development
 
 ```sh
@@ -270,6 +304,8 @@ lives.
 | Filester API key | Disclosure via disk, logs, process list, crash dumps, VCS | Secret Service storage, `SecretString`, log redaction, no argv/env use, `.gitignore` guards |
 | API key in transit | Interception or downgrade | HTTPS-only base URL, rustls with platform verifier, no cleartext fallback |
 | User files | Exfiltration to the wrong host | Single compile-time API origin, cross-origin redirects refused |
+| Downloaded files | Disclosure to other local users, path traversal, unbounded disk use | Owner-only cache (0700/0600), sanitised names, exact size checks, retention cleanup, emptied on sign-out |
+| API key | Leak to download hosts | Download client never holds the key; test asserts no `Authorization` header |
 | Local system | Memory corruption, resource exhaustion | `forbid(unsafe_code)`, streamed uploads, bounded channels |
 | Build pipeline | Dependency or CI compromise | `Cargo.lock`, `cargo-deny`, SHA-pinned actions, read-only CI token |
 
@@ -302,8 +338,9 @@ lives.
   capped at 300 characters before it is stored in an error, which prevents
   log-line forgery. Unit tests assert that the `Debug` output of `ApiKey` and
   `FilesterClient`, and validation error messages, contain no key material.
-- **Sign-out** (`ui/window.rs`): Cancels active uploads, drops the client
-  (and with it the in-memory key), and deletes the keyring item. A 401 from
+- **Sign-out** (`ui/window.rs`): Cancels active transfers, empties the
+  download cache, drops the client (and with it the in-memory key), and
+  deletes the keyring item. A 401 from
   any request triggers the same path, so a revoked key never lingers.
 
 ### Transport security
@@ -332,6 +369,49 @@ lives.
 - JSON response bodies are capped at 32 MiB, and error bodies at 64 KiB.
   Larger responses are refused rather than buffered.
 
+### Downloads and the local cache
+
+Off by default: nothing is downloaded unless the user picks **Open in
+Default App** in Preferences, whose text states that files are stored on
+this computer.
+
+- **Separate client, no key** (`src/api/download.rs`): `PublicDownloader`
+  has its own HTTP client and has no access to the API key, so the key
+  stays confined to `u1.filester.me`. `tests/download.rs` asserts that no
+  download request carries `Authorization` or `Cookie`.
+- **Host allowlist**: the server named in a token response is untrusted. It
+  must be `https`, have no credentials, path, query or fragment, and its
+  host must be in `config::DOWNLOAD_HOSTS` (`filester.me`, `cdn.cr`, or a
+  subdomain of either). Redirects are held to the same rule. Anything else
+  fails with `ApiError::UntrustedDownloadServer` before it is contacted, so
+  a change of CDN breaks downloads loudly rather than silently trusting a
+  new host.
+- **Integrity and size**: the body is streamed to disk and must match the
+  size the API reported, exactly. `Content-Length` is checked before
+  writing, and the stream is cut off if it runs long. A short body fails.
+  Downloads are capped at 10 GiB. Failed downloads delete their partial
+  file. The token sits in the request URL, and URLs are stripped from
+  stored errors and never logged.
+- **Cache layout** (`src/cache.rs`):
+  `$XDG_CACHE_HOME/io.github.scroguard.Filester/files/<slug>/<name>`.
+  Directories are created `0700` (tightened if they already exist) and
+  files `0600`, with `O_EXCL`, so nothing pre-existing is followed or
+  overwritten. A download is written to a hidden `.part` file and renamed
+  into place, so a completed name only ever holds a complete file. The
+  slug must be 1–64 characters of `[A-Za-z0-9_-]`, and the name goes
+  through `safe_file_name`: separators and control characters become `_`,
+  leading dots are removed, and it is shortened to 200 bytes keeping the
+  extension. Downloaded files are never marked executable.
+- **Cleanup**: at every start, partial downloads older than a day are
+  removed, and, if **Remove Old Files Automatically** is on, so are files
+  not opened within the chosen number of days (1–365, default 7). Opening a
+  cached file refreshes its timestamp. Cleanup uses `symlink_metadata`
+  throughout, never follows symlinks, and never descends below the slug
+  directories. Preferences shows the cache size and offers Clear, and
+  sign-out empties the cache completely.
+- **Opening** goes through `GtkFileLauncher`, which defers to the desktop's
+  default handler or, in a sandbox, the `OpenURI` portal.
+
 ### Rate limiting and abuse resistance (`src/api/rate_limit.rs`)
 
 - `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset` are
@@ -352,23 +432,26 @@ lives.
 
 ### Data isolation
 
-- File contents are never cached locally by the app. Uploads are read
-  straight from the user-selected file and streamed in 256 KiB chunks, so
+- File contents are cached locally only when the user turns on **Open in
+  Default App** (see above). Uploads are read straight from the
+  user-selected file and streamed in 256 KiB chunks, so
   peak memory is independent of file size. The size is re-checked on every
   attempt and the stream is capped at that length, so a file modified
   mid-upload fails the transfer instead of sending inconsistent data. Only
   the file's base name is sent, never its directory.
 - Folder and file metadata lives in process memory only and is discarded on
   exit.
-- The app writes no files at all, not even preferences. The only persistent
-  state is the keyring item.
+- Besides the keyring item and the optional download cache, the app writes
+  one file: `$XDG_CONFIG_HOME/io.github.scroguard.Filester/settings.ini`
+  (mode `0600`, written atomically). It holds only the open mode and cache
+  retention, never secrets, and invalid values fall back to defaults.
 - Server-supplied names and messages are untrusted. They go only into
   plain-text widget properties (`Label::set_text`, tooltips, `AdwAlertDialog`
   heading and body). The two libadwaita properties that parse Pango markup by
   default are neutralised in `ui/format.rs`: toasts are created with
   `use-markup = false`, and `AdwStatusPage` descriptions are passed through
-  `glib::markup_escape_text`. The app never writes server-named files to
-  disk; there is no download feature.
+  `glib::markup_escape_text`. Server-supplied names reach the filesystem
+  only as cache file names, after `safe_file_name`.
 - Share links are opened or copied only if they are `https` URLs on
   `filester.me` or one of its subdomains, with no embedded credentials
   (`ui/format.rs::is_safe_share_url`, unit-tested against look-alike hosts).
@@ -386,7 +469,11 @@ lives.
 - Progress events use a bounded, lossy channel: a slow UI drops intermediate
   ticks rather than blocking the upload or growing memory.
 - Dropping the worker cancels outstanding tasks without blocking the UI at
-  exit. Aborting an upload task drops the HTTP request.
+  exit. Aborting a transfer drops the HTTP request. An aborted download
+  leaves a `.part` file, which the next cleanup removes.
+- Cache scans and deletions run on the worker via `spawn_blocking`, never
+  on the GTK thread. Loading `settings.ini` at startup is the one small
+  synchronous read, as with `GSettings`.
 
 ### Code and supply chain
 

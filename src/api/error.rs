@@ -126,7 +126,37 @@ pub enum ApiError {
         limit: u64,
     },
 
-    /// Reading a local file failed, or it changed while being uploaded.
+    /// The file is private. The public download route refuses it, and the
+    /// API offers no authenticated alternative.
+    #[error("the file is private and can only be viewed on the website")]
+    NotPublic,
+
+    /// A download token named a server outside
+    /// [`config::DOWNLOAD_HOSTS`](crate::config::DOWNLOAD_HOSTS), or an
+    /// invalid URL. Nothing was requested from it.
+    #[error("refused to download from an unrecognised server: {0}")]
+    UntrustedDownloadServer(String),
+
+    /// The file is larger than the download size cap.
+    #[error("file is {size} bytes; the download limit is {limit} bytes")]
+    DownloadTooLarge {
+        /// Size reported by the server, in bytes.
+        size: u64,
+        /// Cap in bytes.
+        limit: u64,
+    },
+
+    /// The download ended with a different byte count than expected.
+    #[error("download incomplete: expected {expected} bytes, received {received}")]
+    SizeMismatch {
+        /// Bytes the file should have.
+        expected: u64,
+        /// Bytes actually received.
+        received: u64,
+    },
+
+    /// A local file operation failed: reading an upload (or it changed
+    /// mid-upload), or writing a download to the cache.
     #[error("local file error: {0}")]
     Io(#[from] std::io::Error),
 }

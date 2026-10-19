@@ -37,7 +37,21 @@ pub fn describe_error(err: &ApiError) -> String {
         ApiError::CrossOriginRedirect => {
             "Filester redirected to an unexpected site, so the request was blocked.".to_owned()
         }
-        ApiError::Io(e) => format!("Couldn't read the file: {e}"),
+        ApiError::NotPublic => {
+            "This file is private, so it can only be opened in the browser.".to_owned()
+        }
+        ApiError::UntrustedDownloadServer(_) => {
+            "Filester offered the file from an unrecognised server, so the download was blocked."
+                .to_owned()
+        }
+        ApiError::DownloadTooLarge { limit, .. } => format!(
+            "This file is larger than the {} download limit.",
+            glib::format_size(*limit)
+        ),
+        ApiError::SizeMismatch { .. } => {
+            "The download was incomplete or corrupted. Try again.".to_owned()
+        }
+        ApiError::Io(e) => format!("A file on this computer couldn't be read or written: {e}"),
         other => {
             let text = other.to_string();
             let mut chars = text.chars();
@@ -126,6 +140,11 @@ mod tests {
                 message: "gone".into()
             }),
             "Not found: gone"
+        );
+        assert!(describe_error(&ApiError::NotPublic).contains("private"));
+        assert!(
+            describe_error(&ApiError::UntrustedDownloadServer("https://x".into()))
+                .contains("blocked")
         );
     }
 }

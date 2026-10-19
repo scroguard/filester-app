@@ -17,6 +17,8 @@
 
 mod file_grid;
 mod format;
+mod preferences;
+mod settings;
 mod sidebar;
 mod transfers;
 pub mod window;
