@@ -16,11 +16,40 @@ License: GPL-3.0-or-later
 | Phase | Scope | State |
 |-------|-------|-------|
 | 1 | Repository layout, build configuration, CI, desktop metadata, application shell | **Done** |
-| 2 | API engine: async HTTP, token storage, rate limiting/backoff, streamed multipart uploads, folder-tree reconstruction, unit tests | Planned |
-| 3 | Main window: sidebar navigation, file/folder grid, transfer progress, event handling | Planned |
+| 2 | API engine: async HTTP, token storage, rate limiting/backoff, streamed multipart uploads, folder-tree reconstruction, unit tests | **Done** |
+| 3 | Main window: sidebar navigation, file/folder grid, transfer progress, event handling | **Done** |
 
-Sections below that describe Phase 2/3 behaviour are labelled as such. They
-are design commitments, not shipped features, until that phase lands.
+## Features
+
+- Sign in with an API key. The key is validated against the API, then
+  stored in the system keyring, so later launches sign in automatically.
+- Sidebar folder tree, rebuilt from parent links. It repairs orphaned or
+  cyclic folders instead of hiding them.
+- Icon grid of subfolders and files. Double-click a folder to open it, or a
+  file to open its share page in the browser. Breadcrumbs appear in the
+  header.
+- Uploads from the Upload button or by drag-and-drop. Two run at a time, the
+  rest queue, and each has a progress bar and a cancel button. Closing the
+  window with uploads in progress asks first.
+- New folder (private by default), delete with confirmation, copy share link.
+- Storage usage gauge.
+- Adaptive layout that collapses to a single pane on narrow windows.
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| <kbd>Ctrl</kbd>+<kbd>U</kbd> | Upload files |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> | New folder |
+| <kbd>F5</kbd> / <kbd>Ctrl</kbd>+<kbd>R</kbd> | Refresh |
+| <kbd>Alt</kbd>+<kbd>↑</kbd> | Parent folder |
+| <kbd>Enter</kbd> | Open selected item |
+| <kbd>Delete</kbd> | Delete selected item (file grid focused) |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy share link (file grid focused) |
+| <kbd>Ctrl</kbd>+<kbd>W</kbd> / <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Close / quit |
+
+Delete and Ctrl+C are bound only to the file grid, so they can never fire
+while you're typing in a text field.
 
 ## Why Rust + gtk4-rs
 
@@ -49,25 +78,28 @@ filester-app/
 │   ├── io.github.scroguard.Filester.desktop
 │   └── io.github.scroguard.Filester.metainfo.xml
 ├── src/
-│   ├── main.rs                   # entry point: logging + GApplication
-│   ├── config.rs                 # app ID and other compile-time identity
-│   ├── api/                      # Phase 2 — no GTK imports allowed here
-│   │   ├── mod.rs                #   public engine facade
-│   │   ├── client.rs             #   reqwest client, auth header, HTTPS enforcement
+│   ├── main.rs                   # binary: logging + GApplication (all GTK code)
+│   ├── lib.rs                    # library root: everything testable headlessly
+│   ├── config.rs                 # app ID, API origin, User-Agent
+│   ├── api/                      # REST engine — no GTK imports allowed here
+│   │   ├── mod.rs                #   public facade and re-exports
+│   │   ├── auth.rs               #   ApiKey: validation, redaction, sensitive header
+│   │   ├── client.rs             #   FilesterClient: endpoints, retries, redirects, size caps
 │   │   ├── rate_limit.rs         #   X-RateLimit-* tracking, 429 + Retry-After backoff
-│   │   ├── upload.rs             #   streamed multipart uploads with progress
-│   │   ├── models.rs             #   serde DTOs for API responses
-│   │   ├── tree.rs               #   folder hierarchy from parent-ID links
-│   │   └── error.rs              #   typed error enum
-│   ├── secrets.rs                # Phase 2 — Secret Service / portal token store
-│   ├── worker.rs                 # Phase 2 — tokio runtime ↔ GTK bridge (async-channel)
-│   └── ui/                       # Phase 3
-│       ├── mod.rs
-│       ├── window.rs             #   AdwApplicationWindow + NavigationSplitView
-│       ├── sidebar.rs            #   folder tree navigation
-│       ├── file_grid.rs          #   GridView/ColumnView listing
-│       └── transfers.rs          #   progress rows for uploads
-├── tests/                        # Phase 2 — integration tests against a wiremock server
+│   │   ├── upload.rs             #   streamed multipart body, progress, stall watchdog
+│   │   ├── models.rs             #   serde wire types (lenient decoding)
+│   │   ├── tree.rs               #   folder hierarchy from parent-ID links, anomaly repair
+│   │   └── error.rs              #   ApiError, server-text sanitising
+│   ├── secrets.rs                # Secret Service / portal token store (oo7)
+│   ├── worker.rs                 # tokio runtime ↔ GTK bridge (oneshot + async-channel)
+│   └── ui/                       # GTK front end (binary only)
+│       ├── mod.rs                #   Location, spawn_ui (worker → main-thread bridge)
+│       ├── window.rs             #   window, sign-in, navigation, actions, dialogs
+│       ├── sidebar.rs            #   TreeListModel folder tree + storage gauge
+│       ├── file_grid.rs          #   GridView tiles + context menu
+│       ├── transfers.rs          #   upload queue with progress bars
+│       └── format.rs             #   error text, share-URL validation, markup safety
+├── tests/api_client.rs           # end-to-end client tests against a wiremock server
 ├── Cargo.toml                    # dependencies, lint policy, release profile
 ├── Cargo.lock                    # committed: pinned, auditable dependency graph
 ├── clippy.toml / rustfmt.toml / rust-toolchain.toml
@@ -122,7 +154,8 @@ avoids them, and `deny.toml` bans `openssl-sys` and `native-tls`.
 
 GNOME and KDE Plasma desktops already run a Secret Service provider. On
 minimal window managers (Sway, Hyprland, i3), start `gnome-keyring-daemon`
-or enable KeePassXC's Secret Service integration.
+or enable KeePassXC's Secret Service integration. Without one, the app still
+works: keyring calls give up after 30 seconds, and you sign in each launch.
 
 ### One-line setup
 
@@ -182,12 +215,40 @@ For a system-wide install, replace `~/.local` with `/usr/local` and run as
 root. Make sure `~/.local/bin` is on your `PATH`, because the desktop entry
 calls `filester-app` by name.
 
+## Filester API coverage
+
+The engine talks to the REST API documented at
+<https://filester.me/api-docs>. Note that the API host is
+**`https://u1.filester.me`**: the main site `filester.me` answers 404 on
+every `/api/v1/*` path.
+
+| Endpoint | `FilesterClient` method | Retried on |
+|----------|-------------------------|------------|
+| `GET /health` | `health` (no auth) | 429, 502/503/504, timeout, connect |
+| `GET /api/v1/account` | `account` | same |
+| `GET /api/v1/folders` | `list_folders`, `folder_tree` | same |
+| `GET /api/v1/folder/{id}/files` | `folder_files` | same |
+| `GET /api/v1/files` | `list_files` | same |
+| `GET /api/v1/file/{id}` | `file` | same |
+| `GET /api/v1/upload/status` | `upload_status` | same |
+| `POST /api/v1/upload` | `upload` (guest or authenticated) | 429, connect only |
+| `POST /api/v1/folder` | `create_folder` | 429, connect only |
+| `POST /api/v1/folder/thumbnail` | `set_folder_thumbnail` | 429, connect only |
+| `POST /api/v1/folder/move`, `/folders/move` | `move_folder`, `move_folders` | 429, connect only |
+| `POST /api/v1/file/move`, `/files/move` | `move_file`, `move_files` | 429, connect only |
+| `POST /file/delete`, `/folder/delete` | `delete_files`, `delete_folders` | 429, connect only |
+
+POST requests are never retried after the server may have processed them.
+A 429 means the request was rejected up front, and a connect failure means
+it never left the machine.
+
 ## Development
 
 ```sh
 cargo fmt --all                                    # format
 cargo clippy --locked --all-targets -- -D warnings # lint (pedantic, see Cargo.toml)
 cargo test --locked                                # unit + integration tests
+cargo test --test keyring_live -- --ignored --nocapture  # read-only check against your real keyring
 cargo deny check                                   # supply-chain audit (cargo install --locked cargo-deny)
 desktop-file-validate data/*.desktop
 appstreamcli validate --no-net data/*.metainfo.xml
@@ -200,9 +261,7 @@ own package names from the matrix above, and checks the MSRV separately.
 ## Security & Auditing
 
 This section is the audit map. Each item names the mechanism and where it
-lives. Items marked *(Phase 2)* or *(Phase 3)* are design requirements for code
-that is not yet merged. Auditors should treat them as claims to verify once
-that phase lands.
+lives.
 
 ### Threat model
 
@@ -210,57 +269,83 @@ that phase lands.
 |-------|--------|------------|
 | Filester API key | Disclosure via disk, logs, process list, crash dumps, VCS | Secret Service storage, `SecretString`, log redaction, no argv/env use, `.gitignore` guards |
 | API key in transit | Interception or downgrade | HTTPS-only base URL, rustls with platform verifier, no cleartext fallback |
-| User files | Exfiltration to the wrong host | Single fixed origin, cross-origin redirects refused |
+| User files | Exfiltration to the wrong host | Single compile-time API origin, cross-origin redirects refused |
 | Local system | Memory corruption, resource exhaustion | `forbid(unsafe_code)`, streamed uploads, bounded channels |
 | Build pipeline | Dependency or CI compromise | `Cargo.lock`, `cargo-deny`, SHA-pinned actions, read-only CI token |
 
 ### Token handling
 
-- **At rest** *(Phase 2)*: The API key is stored only in the desktop Secret
-  Service (GNOME Keyring, KWallet, KeePassXC) through
-  [`oo7`](https://crates.io/crates/oo7), with attributes namespaced by the app
-  ID. Inside a Flatpak sandbox, oo7 automatically uses the XDG Secret portal
-  instead. The key is never written to a config file, cache, or GSettings.
-- **In memory** *(Phase 2)*: The key is held in `secrecy::SecretString`, which
-  zeroizes its buffer on drop and prints `[REDACTED]` from `Debug`. It is
-  exposed only at the moment the `Authorization` header value is built. That
-  header value is marked sensitive (`HeaderValue::set_sensitive`) so hyper and
-  tracing do not render it.
+- **At rest** (`src/secrets.rs`): The API key is stored only in the desktop
+  Secret Service (GNOME Keyring, KWallet, KeePassXC) through
+  [`oo7`](https://crates.io/crates/oo7), under the attributes
+  `application=io.github.scroguard.Filester` and `kind=api-key`. Inside a
+  Flatpak sandbox, oo7 automatically uses the XDG Secret portal instead. The
+  key is never written to a config file, cache, or GSettings.
+- **In memory** (`src/api/auth.rs`): The key is validated as 8–512 visible
+  ASCII characters, which rules out CR/LF header injection. It is held in
+  `secrecy::SecretString`, which zeroizes on drop and is redacted from `Debug`.
+  Plaintext is exposed by exactly two `pub(crate)` functions,
+  `authorization_header` and `expose_for_storage`; `grep expose_` lists every
+  call site. The temporary `"Bearer …"` string is `Zeroizing`, and the header
+  value is marked sensitive. *Limitation:* copies made inside hyper and rustls
+  while the request is written are outside the app's control and are not
+  zeroized.
 - **Never via the process environment or argv**: There is no `--api-key` flag
   and no `FILESTER_API_KEY` variable, because both leak through
   `/proc/<pid>/cmdline`, `/proc/<pid>/environ` and shell history. The key is
-  entered in the GUI only *(Phase 3)*.
-- **Logging policy**: No log statement may format request headers, the token,
-  or full response bodies. Logged URLs contain only the path, never query
-  strings. A unit test asserts that the `Debug` output of the client and
-  credential types contains no secret material *(Phase 2)*.
-- **Sign-out** *(Phase 3)*: Removes the keyring item and drops every in-memory
-  copy.
+  entered only in a `GtkPasswordEntry`, which is cleared as soon as the key
+  is read. *Limitation:* GTK's internal text buffers are not zeroized.
+- **Logging policy**: No log statement formats request headers, the token,
+  URLs, or response bodies. Transport errors have their URL stripped
+  (`reqwest::Error::without_url`), so search terms in query strings never
+  reach logs. Server-supplied text is stripped of control characters and
+  capped at 300 characters before it is stored in an error, which prevents
+  log-line forgery. Unit tests assert that the `Debug` output of `ApiKey` and
+  `FilesterClient`, and validation error messages, contain no key material.
+- **Sign-out** (`ui/window.rs`): Cancels active uploads, drops the client
+  (and with it the in-memory key), and deletes the keyring item. A 401 from
+  any request triggers the same path, so a revoked key never lingers.
 
 ### Transport security
 
-- The base URL is the compile-time constant `https://filester.me`. The client
-  refuses any non-`https` URL before a request is built *(Phase 2)*.
-- TLS uses **rustls** (memory-safe), with certificate verification delegated
-  to `rustls-platform-verifier`, which reads the distro's trust store. This
+- The API origin is the compile-time constant `https://u1.filester.me`
+  (`src/config.rs`), with no runtime override. `ClientConfig` rejects any base
+  URL that is not `https`, or that carries credentials, a path, a query or a
+  fragment. The single exception is plain `http` to a *literal* loopback IP
+  (not the name `localhost`), which exists so the integration tests can use
+  a local mock server. `https_only` is set on the HTTP client whenever the
+  base is `https`. Path segments built from server-supplied IDs are
+  percent-encoded, so an ID cannot inject `/`, `..`, `?` or `#`.
+- TLS uses **rustls** (memory-safe), at TLS 1.2 or newer, with certificate
+  verification delegated to `rustls-platform-verifier`, which reads the
+  distro's trust store. This
   respects enterprise CAs installed via `update-ca-trust` or
   `update-ca-certificates`. There is no option to disable verification.
-- The redirect policy allows **same-origin redirects only**. A redirect to
-  another host is treated as an error rather than followed, so the
-  `Authorization` header can never be forwarded off-origin *(Phase 2)*.
-- Every request has explicit connect and read timeouts. Uploads use an idle
-  timeout instead of a total timeout, so slow 10 GB transfers are not killed
-  mid-stream *(Phase 2)*.
+- The redirect policy allows **same-origin redirects only**, at most 5 hops.
+  A redirect to another host is a hard error (`ApiError::CrossOriginRedirect`)
+  rather than being followed, so the `Authorization` header can never be
+  forwarded off-origin. An integration test covers this.
+- Every request has explicit timeouts: connect 15 s, per-read 60 s, and a
+  60 s total for ordinary calls. Uploads have no total timeout. Instead, a
+  watchdog fails the transfer if no body bytes are accepted for 120 s, then
+  allows 10 minutes for the server's reply once the body is sent.
+- JSON response bodies are capped at 32 MiB, and error bodies at 64 KiB.
+  Larger responses are refused rather than buffered.
 
-### Rate limiting and abuse resistance *(Phase 2)*
+### Rate limiting and abuse resistance (`src/api/rate_limit.rs`)
 
 - `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset` are
   parsed on every response. Requests are delayed proactively when the
-  remaining budget hits zero.
+  remaining budget hits zero. The API docs do not say whether `Reset` is an
+  epoch timestamp or a delta, so values ≥ 10⁹ are read as Unix seconds and
+  smaller ones as seconds-from-now. The state is shared by every clone of the
+  client. As of October 2026 the live API sends none of these headers, so in
+  practice the budget is enforced by the 429 handling below.
 - HTTP 429 triggers exponential backoff with full jitter. A `Retry-After`
   header (delta-seconds or HTTP-date) always takes precedence and acts as a
-  lower bound. Retries are capped in count and in total wall-clock time, so a
-  misbehaving server cannot stall the app indefinitely.
+  lower bound. Retries are capped at 5 attempts. Any single wait longer than
+  120 s is not taken silently: it surfaces as `ApiError::RateLimited` with
+  the required wait, so the UI can inform the user.
 - Non-idempotent requests (uploads) are retried only when the server
   explicitly answered 429, meaning the request was rejected before
   processing.
@@ -268,25 +353,40 @@ that phase lands.
 ### Data isolation
 
 - File contents are never cached locally by the app. Uploads are read
-  straight from the user-selected file and streamed in fixed-size chunks.
-  Peak memory is independent of file size.
+  straight from the user-selected file and streamed in 256 KiB chunks, so
+  peak memory is independent of file size. The size is re-checked on every
+  attempt and the stream is capped at that length, so a file modified
+  mid-upload fails the transfer instead of sending inconsistent data. Only
+  the file's base name is sent, never its directory.
 - Folder and file metadata lives in process memory only and is discarded on
   exit.
-- The app writes no files outside `$XDG_CONFIG_HOME/filester-app/` (UI
-  preferences only, no secrets). The only exception is download targets the
-  user explicitly chooses in a file dialog *(Phase 3)*.
-- Server-supplied names are treated as untrusted. They are rendered as plain
-  text (never Pango markup), and they are never used to build local paths
-  without sanitising path separators, `..` and NUL bytes *(Phase 3)*.
+- The app writes no files at all, not even preferences. The only persistent
+  state is the keyring item.
+- Server-supplied names and messages are untrusted. They go only into
+  plain-text widget properties (`Label::set_text`, tooltips, `AdwAlertDialog`
+  heading and body). The two libadwaita properties that parse Pango markup by
+  default are neutralised in `ui/format.rs`: toasts are created with
+  `use-markup = false`, and `AdwStatusPage` descriptions are passed through
+  `glib::markup_escape_text`. The app never writes server-named files to
+  disk; there is no download feature.
+- Share links are opened or copied only if they are `https` URLs on
+  `filester.me` or one of its subdomains, with no embedded credentials
+  (`ui/format.rs::is_safe_share_url`, unit-tested against look-alike hosts).
+- New folders are **private by default**. The API's own default is public,
+  so the dialog offers public visibility as an explicit opt-in.
 
 ### Concurrency model
 
-- The GTK main thread never performs I/O. A dedicated multi-threaded tokio
-  runtime runs all networking, file reading and tree reconstruction. Results
-  return to the UI over `async-channel` and are consumed with
-  `glib::spawn_future_local` *(Phase 2/3)*.
-- Channels between the worker and the UI are bounded, so a fast producer
-  cannot grow memory without limit.
+- The GTK main thread never performs I/O. A dedicated 4-thread tokio runtime
+  (`src/worker.rs`) runs all networking, file reading and tree
+  reconstruction. Results return through executor-agnostic oneshot channels
+  that the UI awaits with `glib::spawn_future_local` (`ui::spawn_ui`). Each
+  folder load carries a generation number, so a slow response for a folder
+  the user has left is discarded rather than shown.
+- Progress events use a bounded, lossy channel: a slow UI drops intermediate
+  ticks rather than blocking the upload or growing memory.
+- Dropping the worker cancels outstanding tasks without blocking the UI at
+  exit. Aborting an upload task drops the HTTP request.
 
 ### Code and supply chain
 

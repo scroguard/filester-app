@@ -1,27 +1,56 @@
 //! Filester desktop client: process entry point.
 //!
-//! Responsibilities are deliberately narrow:
+//! Responsibilities:
 //!
 //! 1. Initialise structured logging to stderr. Log output never includes
 //!    credentials; see the "Security & Auditing" section of `README.md`.
-//! 2. Create the [`adw::Application`] and hand control to the GTK main loop.
-//!
-//! Networking and other blocking work never run on this thread. The API
-//! engine and background worker live in the `filester_app` library; the main
-//! window module (Phase 3) starts the worker and replaces [`build_shell`].
+//! 2. Start the background [`Worker`] runtime, which runs all networking and
+//!    file I/O.
+//! 3. Create the [`adw::Application`], register keyboard shortcuts, and
+//!    build the single [`ui::window::MainWindow`] on first activation.
+
+mod ui;
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use adw::prelude::*;
 use filester_app::config;
-use gtk::glib;
+use filester_app::worker::Worker;
+use gtk::{gio, glib};
+use tracing::error;
 use tracing_subscriber::EnvFilter;
+
+use ui::window::MainWindow;
 
 fn main() -> glib::ExitCode {
     init_tracing();
 
+    let worker = match Worker::new() {
+        Ok(worker) => Rc::new(worker),
+        Err(err) => {
+            error!(error = %err, "could not start background worker");
+            return glib::ExitCode::FAILURE;
+        }
+    };
+
     let app = adw::Application::builder()
         .application_id(config::APP_ID)
         .build();
-    app.connect_activate(build_shell);
+    register_app_actions(&app);
+
+    // `GApplication` is single-instance: a second launch re-activates this
+    // process, which then raises the existing window.
+    let window: Rc<RefCell<Option<Rc<MainWindow>>>> = Rc::default();
+    app.connect_activate(move |app| {
+        if let Some(existing) = window.borrow().as_ref() {
+            existing.present();
+            return;
+        }
+        let main_window = MainWindow::new(app, Rc::clone(&worker));
+        main_window.start();
+        *window.borrow_mut() = Some(main_window);
+    });
     app.run()
 }
 
@@ -39,33 +68,29 @@ fn init_tracing() {
         .init();
 }
 
-/// Present the application window on `activate`.
+/// Application-wide actions and keyboard shortcuts.
 ///
-/// `GApplication` is single-instance, so a second launch re-activates the
-/// running process. In that case the existing window is raised and no
-/// second one is created.
-fn build_shell(app: &adw::Application) {
-    if let Some(window) = app.active_window() {
-        window.present();
-        return;
-    }
+/// Item-level shortcuts (Delete, Ctrl+C) are deliberately absent here: they
+/// are scoped to the file grid in `ui::window`, so they cannot fire while a
+/// text field has focus.
+fn register_app_actions(app: &adw::Application) {
+    let quit = gio::SimpleAction::new("quit", None);
+    let app_weak = app.downgrade();
+    quit.connect_activate(move |_, _| {
+        if let Some(app) = app_weak.upgrade() {
+            // Route through the window so the active-upload prompt runs.
+            match app.active_window() {
+                Some(window) => window.close(),
+                None => app.quit(),
+            }
+        }
+    });
+    app.add_action(&quit);
 
-    let status = adw::StatusPage::builder()
-        .icon_name(config::APP_ID)
-        .title(config::APP_NAME)
-        .description("Not connected to a Filester account.")
-        .build();
-
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&adw::HeaderBar::new());
-    toolbar.set_content(Some(&status));
-
-    let window = adw::ApplicationWindow::builder()
-        .application(app)
-        .title(config::APP_NAME)
-        .default_width(1000)
-        .default_height(700)
-        .content(&toolbar)
-        .build();
-    window.present();
+    app.set_accels_for_action("app.quit", &["<Control>q"]);
+    app.set_accels_for_action("window.close", &["<Control>w"]);
+    app.set_accels_for_action("win.upload", &["<Control>u"]);
+    app.set_accels_for_action("win.new-folder", &["<Control><Shift>n"]);
+    app.set_accels_for_action("win.refresh", &["F5", "<Control>r"]);
+    app.set_accels_for_action("win.go-up", &["<Alt>Up"]);
 }
