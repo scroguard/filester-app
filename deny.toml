@@ -11,7 +11,15 @@ all-features = false
 [advisories]
 # Fail on any RustSec advisory (vulnerability, unmaintained, unsound, yanked).
 yanked = "deny"
-ignore = []
+ignore = [
+    # zvariant, zbus_names and zvariant_derive are "unmaintained" only
+    # because zbus 6 absorbed them; no vulnerability is reported. They reach
+    # us through oo7 0.6 (the current stable release), which requires zbus 5.
+    # Remove these once a stable oo7 on zbus 6 is released (0.7 is in beta).
+    { id = "RUSTSEC-2026-0370", reason = "unmaintained only; via oo7 0.6 -> zbus 5, no stable upgrade" },
+    { id = "RUSTSEC-2026-0371", reason = "unmaintained only; via oo7 0.6 -> zbus 5, no stable upgrade" },
+    { id = "RUSTSEC-2026-0372", reason = "unmaintained only; via oo7 0.6 -> zbus 5, no stable upgrade" },
+]
 
 [licenses]
 # Every dependency licence must be compatible with GPL-3.0-or-later.

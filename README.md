@@ -398,7 +398,10 @@ lives.
 - `cargo-deny` (`deny.toml`) enforces RustSec advisories (including yanked and
   unmaintained crates), a GPL-compatible licence allow-list, crates.io as the
   only source, no wildcard versions, and a ban on `openssl-sys` and
-  `native-tls`.
+  `native-tls`. Every ignored advisory is listed by ID in `deny.toml` with
+  its reason. Currently the only ones are RUSTSEC-2026-0370/0371/0372,
+  "unmaintained" notices (no vulnerability) for `zbus` 5 sub-crates that
+  `oo7` 0.6 depends on; they go once a stable `oo7` on `zbus` 6 ships.
 - GitHub Actions are pinned to full commit SHAs. The workflow token is
   `contents: read`, and `actions/checkout` runs with
   `persist-credentials: false`. Dependabot proposes updates for both cargo and
