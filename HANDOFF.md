@@ -12,6 +12,12 @@ _Last updated 2026-10-19, at release v0.1.2._
   ships `.deb` (Debian 13 / Ubuntu 24.04+), `.rpm` (Fedora), an Arch
   `.pkg.tar.zst` and a universal tarball with `install.sh`, plus
   `SHA256SUMS` and build-provenance attestations.
+- **Release history:**
+  - v0.1.0: first release.
+  - v0.1.1: display name changed to Filester Manager.
+  - v0.1.2: multiple selection; moving; deletes and moves shown in the
+    Activity panel; fixed deleting top-level files and deleting more than
+    100 items.
 - **Working:**
   - API-key sign-in stored in the Secret Service.
   - Folder sidebar and file grid.
@@ -23,6 +29,8 @@ _Last updated 2026-10-19, at release v0.1.2._
     are limited by the API to 100 identifiers per request, so
     `delete_files` / `delete_folders` split longer lists themselves
     (`MAX_DELETE_ITEMS`). No rename call is implemented.
+  - Activity panel at the bottom of the window: uploads, downloads,
+    deletions and moves, each with progress and a stop button.
   - Rate-limit handling with `Retry-After`.
   - Opening files in the browser (default), or opening public files in local
     apps through a cache that is cleaned automatically.
@@ -147,19 +155,62 @@ Conventions:
   - `tests/download.rs` mocks the expected behaviour.
 - Share slugs come from the `slug` field, or are parsed from
   `https://filester.me/d/<slug>`.
+- **Identify files by numeric ID** (`FileEntry::reference()`). The docs say
+  move and delete accept a slug, UUID or numeric ID, but `POST /file/delete`
+  rejects UUIDs and answers "All file deletions failed" (HTTP 400). Moves
+  accept both. The top-level file list includes a UUID; folder listings
+  include neither UUID nor slug. Preferring the UUID made every top-level
+  delete fail before v0.1.2.
+- **Request limits on bulk endpoints:**
+  - At most 100 identifiers per delete request. Longer lists fail, so the
+    client splits them.
+  - At most 200 items per move request.
+  - When every item in a delete fails, the server answers with an error
+    (`ApiError::BadRequest`), not a report. A partial failure comes back
+    as a report with counts.
+- Moving a folder into itself comes back as a per-item failure
+  (`INVALID_DESTINATION`) inside a successful bulk-move report, not as an
+  error. The UI blocks it before sending (`move_dialog::check`).
 
 ## Testing against the live service
 
-- The owner's account has real data. **Never delete anything that already
-  existed there.** Put all test uploads and folders in the
-  `filester-app_test` folder, which already holds test files from
-  development and may be cleaned up whenever you like.
+- The owner's account has real data (about 100 folders holding about
+  51,000 files).
+  - **Never touch files inside any folder** other than
+    `filester-app_test`.
+  - Put all test uploads and folders in `filester-app_test`. It holds test
+    files from development, including subfolders `move-a` and `move-b` from
+    the bulk-move check, and may be cleaned up whenever you like.
+  - **Top-level files** (in no folder) may be deleted for testing. The
+    owner allowed this on 2026-10-19; about 380 were left after the
+    150-item delete test.
+  - Before deleting them, list them with the root filter and keep only
+    entries whose `folder_id` is `None`. The test cross-checked those
+    against every folder's contents and found no overlap.
 - Ask the owner for an API key; none is stored anywhere in this repository.
   Paste it into the app's sign-in dialog, which saves it in the keyring.
   Never commit a key, put it in a command line or an environment variable,
   or print it in logs. `.gitignore` has guard patterns for this.
 - `tests/keyring_live.rs` only reads from the keyring. Writing to the
   developer's real keyring needs the owner's explicit permission.
+- **Live checks outside the app:** write a tiny scratch crate (outside
+  the repo) that depends on `filester-app` by path and calls
+  `FilesterClient` directly. That is how bulk moves, the delete limit and
+  the UUID problem were found and verified.
+- **Screenshots of UI pieces without signing in:**
+  - The UI modules belong to the binary, so a scratch harness crate
+    symlinks the module files it needs (for example `file_grid.rs`,
+    `move_dialog.rs`, `transfers.rs`) and feeds them fake data.
+  - Run it in a nested compositor:
+    `dbus-run-session -- kwin_wayland --virtual --no-lockscreen --width 1100 --height 700 --exit-with-session <script>`,
+    where the script starts the harness and runs `spectacle -b -n -f -o out.png`.
+  - Without `dbus-run-session`, spectacle fails. Without
+    `--no-lockscreen`, you capture a lock screen.
+  - Clicks and drag-and-drop can't be scripted this way, so check them by
+    hand with `cargo run`.
+- **`/tmp` is a small tmpfs.** Scratch builds of GTK crates use several GB.
+  Point `CARGO_TARGET_DIR` at a directory on disk, such as
+  `target/harness` in the repo, which git ignores.
 
 ## Open ideas (not started)
 
@@ -171,6 +222,10 @@ Conventions:
 - [ ] Ask for confirmation before opening a very large public file locally,
       since it is downloaded to the cache first.
 - [ ] Signed tags (`git tag -s`) once a signing key is set up.
+- [ ] Rename files and folders. No API call is implemented yet; check the
+      API docs for an endpoint first.
+- [ ] Hide tiles as soon as their deletion is sent, rather than waiting
+      for the refresh after the whole operation.
 
 ## Housekeeping
 
