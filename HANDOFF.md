@@ -66,7 +66,7 @@ pedantic clippy warnings as errors in CI.
 | Download cache | `src/cache.rs` | Directories are 0700 and files 0600, created with `O_EXCL`. Cleanup is symlink-safe. |
 | Background runtime | `src/worker.rs` | **The GTK thread never blocks.** All I/O goes through `Worker::spawn` / `ui::spawn_ui`. |
 | Main window, actions, menus | `src/ui/window.rs` | The largest file. Start here for UI changes. |
-| Sidebar, grid, transfers | `src/ui/sidebar.rs`, `file_grid.rs`, `transfers.rs` | The grid uses `MultiSelection`. Drags carry `DraggedItems` as an in-process GObject value. |
+| Sidebar, grid, activity panel | `src/ui/sidebar.rs`, `file_grid.rs`, `transfers.rs` | The grid uses `MultiSelection`. Drags carry `DraggedItems` as an in-process GObject value. The activity panel (`transfers.rs`) shows uploads, downloads, deletions and moves; deletions and moves share a one-at-a-time queue and report progress per batch. |
 | Move dialog and move rules | `src/ui/move_dialog.rs` | `check()` is shared by the dialog and drag-and-drop, and is unit tested. |
 | Preferences and settings file | `src/ui/preferences.rs`, `src/ui/settings.rs` | `$XDG_CONFIG_HOME/io.github.scroguard.Filester/settings.ini` |
 | Desktop entry, AppStream, icon | `data/` | Validated in CI. |

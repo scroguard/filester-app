@@ -42,6 +42,10 @@ License: GPL-3.0-or-later · Picking the project up? Start with [HANDOFF.md](HAN
   opening locally. Two of each run at a time, the rest queue, and each has a
   progress bar and a cancel button. Closing the window with transfers in
   progress asks first.
+- Deletions and moves also appear in the **Activity** panel at the bottom,
+  with an items-done count that updates after each request (the API takes
+  100 deletions or 200 moves per request) and a Stop button. They run one at
+  a time; items already handled stay deleted or moved if you stop.
 - Multiple selection: Ctrl+click, Shift+click, drag a box on empty space,
   or Ctrl+A. Delete, Move and Copy Link act on everything selected.
 - Move files and folders with **Move to…** (right-click or Ctrl+M), which
@@ -121,7 +125,7 @@ filester-app/
 │       ├── window.rs             #   window, sign-in, navigation, actions, dialogs
 │       ├── sidebar.rs            #   TreeListModel folder tree + storage gauge
 │       ├── file_grid.rs          #   GridView tiles + context menu
-│       ├── transfers.rs          #   upload/download queue with progress bars
+│       ├── transfers.rs          #   activity panel: transfers, deletions, moves
 │       ├── preferences.rs        #   Preferences dialog (open mode, cache retention)
 │       ├── settings.rs           #   settings.ini load/save, XDG paths
 │       └── format.rs             #   error text, share-URL validation, markup safety

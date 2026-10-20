@@ -1,11 +1,16 @@
-//! Upload and download queue with per-file progress bars.
+//! Activity panel: uploads, downloads, deletions and moves, each with a
+//! progress bar.
 //!
 //! At most [`MAX_CONCURRENT`] uploads, and separately at most
 //! [`MAX_CONCURRENT`] downloads, run at once, enforced by semaphores on the
-//! worker side. Queued transfers hold no file handle and use no bandwidth.
+//! worker side. Deletions and moves run one at a time, in the order they were
+//! started. Queued work holds no file handle and sends no requests.
 //! Each row shows a live progress bar fed by a lossy channel (see
-//! [`filester_app::worker::progress_channel`]), and its cancel button aborts
-//! the task, which drops the HTTP request.
+//! [`filester_app::worker::progress_channel`]): bytes for transfers, items
+//! for deletions and moves. The bar pulses while the first batch of a
+//! deletion or move is in flight. The stop button aborts the task, which
+//! drops the HTTP request; for deletions and moves, batches already sent
+//! stay done.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -31,6 +36,33 @@ use super::{format, spawn_ui};
 const MAX_CONCURRENT: usize = 2;
 /// Progress events buffered per upload before intermediate ones are dropped.
 const PROGRESS_BUFFER: usize = 16;
+/// How often an item-counting row's bar pulses while it waits for its first
+/// batch to finish.
+const PULSE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// Which concurrency limit a kind of activity shares.
+#[derive(Clone, Copy)]
+enum Queue {
+    Uploads,
+    Downloads,
+    Operations,
+}
+
+/// What a row's progress counts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Unit {
+    Bytes,
+    Items,
+}
+
+/// Outcome of a deletion or move.
+#[derive(Debug, Clone, Copy)]
+pub struct OperationReport {
+    /// Items the operation was asked to handle.
+    pub total: u64,
+    /// Items the server reported as failed.
+    pub failed: u64,
+}
 
 /// One row in the panel.
 struct Transfer {
@@ -40,10 +72,13 @@ struct Transfer {
     cancel: gtk::Button,
     abort: RefCell<Option<AbortHandle>>,
     finished: Cell<bool>,
+    unit: Unit,
+    /// Set while the bar pulses; cleared by the first real progress.
+    pulsing: Cell<bool>,
 }
 
 impl Transfer {
-    fn new(name: &str, cancel_tooltip: &str) -> Self {
+    fn new(name: &str, cancel_tooltip: &str, unit: Unit) -> Self {
         let title = gtk::Label::builder()
             .xalign(0.0)
             .hexpand(true)
@@ -95,23 +130,56 @@ impl Transfer {
             cancel,
             abort: RefCell::new(None),
             finished: Cell::new(false),
+            unit,
+            pulsing: Cell::new(false),
         }
     }
 
-    fn progress(&self, p: TransferProgress) {
+    fn progress(self: &Rc<Self>, p: TransferProgress) {
         if self.finished.get() {
             return;
         }
-        self.bar.set_fraction(p.fraction());
-        self.status.set_text(&format!(
-            "{} of {}",
-            glib::format_size(p.sent),
-            glib::format_size(p.total)
-        ));
+        match self.unit {
+            Unit::Bytes => {
+                self.bar.set_fraction(p.fraction());
+                self.status.set_text(&format!(
+                    "{} of {}",
+                    glib::format_size(p.sent),
+                    glib::format_size(p.total)
+                ));
+            }
+            // Nothing is done yet: pulse until the first batch returns.
+            Unit::Items if p.sent == 0 => {
+                self.status
+                    .set_text(&format!("Working on {}…", items(p.total)));
+                self.start_pulsing();
+            }
+            Unit::Items => {
+                self.pulsing.set(false);
+                self.bar.set_fraction(p.fraction());
+                self.status
+                    .set_text(&format!("{} of {}", p.sent, items(p.total)));
+            }
+        }
+    }
+
+    fn start_pulsing(self: &Rc<Self>) {
+        if self.pulsing.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local(PULSE_INTERVAL, move || match weak.upgrade() {
+            Some(t) if t.pulsing.get() && !t.finished.get() => {
+                t.bar.pulse();
+                glib::ControlFlow::Continue
+            }
+            _ => glib::ControlFlow::Break,
+        });
     }
 
     fn finish<T>(&self, outcome: &Result<Result<T, ApiError>, TaskCancelled>, done: &str) {
         self.finished.set(true);
+        self.pulsing.set(false);
         self.cancel.set_visible(false);
         match outcome {
             Ok(Ok(_)) => {
@@ -125,7 +193,10 @@ impl Transfer {
                 self.status.remove_css_class("dim-label");
                 self.status.add_css_class("error");
             }
-            Err(TaskCancelled) => self.status.set_text("Cancelled"),
+            Err(TaskCancelled) => self.status.set_text(match self.unit {
+                Unit::Bytes => "Cancelled",
+                Unit::Items => "Stopped; items already handled stay done",
+            }),
         }
     }
 
@@ -143,27 +214,58 @@ pub struct TransfersPanel {
     transfers: RefCell<Vec<Rc<Transfer>>>,
     uploads: Arc<Semaphore>,
     downloads: Arc<Semaphore>,
+    operations: Arc<Semaphore>,
 }
 
-/// Labels for one kind of transfer.
-struct Kind {
+/// Labels for one kind of activity.
+pub struct Kind {
     cancel_tooltip: &'static str,
+    /// Finished status; for deletions and moves, the verb ("Deleted").
     done: &'static str,
+    unit: Unit,
+    queue: Queue,
 }
 
 const UPLOAD: Kind = Kind {
     cancel_tooltip: "Cancel Upload",
     done: "Uploaded",
+    unit: Unit::Bytes,
+    queue: Queue::Uploads,
 };
 const DOWNLOAD: Kind = Kind {
     cancel_tooltip: "Cancel Download",
     done: "Downloaded",
+    unit: Unit::Bytes,
+    queue: Queue::Downloads,
 };
+/// A deletion of one or more items.
+pub const DELETE: Kind = Kind {
+    cancel_tooltip: "Stop Deleting",
+    done: "Deleted",
+    unit: Unit::Items,
+    queue: Queue::Operations,
+};
+/// A move of one or more items.
+pub const MOVE: Kind = Kind {
+    cancel_tooltip: "Stop Moving",
+    done: "Moved",
+    unit: Unit::Items,
+    queue: Queue::Operations,
+};
+
+/// "1 item", "150 items".
+fn items(n: u64) -> String {
+    if n == 1 {
+        "1 item".to_owned()
+    } else {
+        format!("{n} items")
+    }
+}
 
 impl TransfersPanel {
     pub fn new() -> Rc<Self> {
         let heading = gtk::Label::builder()
-            .label("Transfers")
+            .label("Activity")
             .xalign(0.0)
             .hexpand(true)
             .build();
@@ -205,6 +307,7 @@ impl TransfersPanel {
             transfers: RefCell::new(Vec::new()),
             uploads: Arc::new(Semaphore::new(MAX_CONCURRENT)),
             downloads: Arc::new(Semaphore::new(MAX_CONCURRENT)),
+            operations: Arc::new(Semaphore::new(1)),
         });
         let weak = Rc::downgrade(&panel);
         clear.connect_clicked(move |_| {
@@ -238,8 +341,8 @@ impl TransfersPanel {
             worker,
             &name,
             &UPLOAD,
-            Arc::clone(&self.uploads),
             move |progress| async move { client.upload(&path, folder.as_ref(), Some(progress)).await },
+            |_| UPLOAD.done.to_owned(),
             move |outcome| on_done(matches!(outcome, Ok(Ok(_)))),
         );
     }
@@ -262,11 +365,43 @@ impl TransfersPanel {
             worker,
             &label,
             &DOWNLOAD,
-            Arc::clone(&self.downloads),
             move |progress| async move {
                 cache
                     .fetch(&downloader, &slug, &name, size, Some(progress))
                     .await
+            },
+            |_| DOWNLOAD.done.to_owned(),
+            on_done,
+        );
+    }
+
+    /// Queue a deletion or move titled `title`. `work` reports progress as
+    /// items done out of the total, and runs after earlier deletions and
+    /// moves have finished.
+    pub fn enqueue_operation<W, Fut>(
+        self: &Rc<Self>,
+        worker: &Worker,
+        title: &str,
+        kind: &'static Kind,
+        work: W,
+        on_done: impl FnOnce(Result<Result<OperationReport, ApiError>, TaskCancelled>) + 'static,
+    ) where
+        W: FnOnce(ProgressCallback) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<OperationReport, ApiError>> + Send,
+    {
+        self.run(
+            worker,
+            title,
+            kind,
+            work,
+            move |report: &OperationReport| match report.failed {
+                0 => format!("{} {}", kind.done, items(report.total)),
+                failed => format!(
+                    "{} {} of {}; {failed} failed",
+                    kind.done,
+                    report.total.saturating_sub(failed),
+                    items(report.total)
+                ),
             },
             on_done,
         );
@@ -279,15 +414,20 @@ impl TransfersPanel {
         worker: &Worker,
         name: &str,
         kind: &'static Kind,
-        queue: Arc<Semaphore>,
         work: W,
+        done_text: impl FnOnce(&T) -> String + 'static,
         on_done: impl FnOnce(Result<Result<T, ApiError>, TaskCancelled>) + 'static,
     ) where
         T: Send + 'static,
         W: FnOnce(ProgressCallback) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, ApiError>> + Send,
     {
-        let transfer = Rc::new(Transfer::new(name, kind.cancel_tooltip));
+        let queue = Arc::clone(match kind.queue {
+            Queue::Uploads => &self.uploads,
+            Queue::Downloads => &self.downloads,
+            Queue::Operations => &self.operations,
+        });
+        let transfer = Rc::new(Transfer::new(name, kind.cancel_tooltip, kind.unit));
         self.list.append(&transfer.row);
         self.transfers.borrow_mut().push(Rc::clone(&transfer));
         self.revealer.set_reveal_child(true);
@@ -303,7 +443,11 @@ impl TransfersPanel {
                 work(callback).await
             },
             move |outcome| {
-                done_transfer.finish(&outcome, kind.done);
+                let done = match &outcome {
+                    Ok(Ok(value)) => done_text(value),
+                    _ => String::new(),
+                };
+                done_transfer.finish(&outcome, &done);
                 on_done(outcome);
             },
         );

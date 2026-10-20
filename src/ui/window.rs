@@ -11,7 +11,7 @@
 //!          ├─ sidebar: HeaderBar, folder tree, storage gauge
 //!          └─ content: HeaderBar (Up, title, Upload, New Folder, menu)
 //!                      GtkStack "loading" | "grid" | "empty" | "error"
-//!                      transfers panel (bottom bar)
+//!                      activity panel (bottom bar)
 //! ```
 //!
 //! # Threading and state
@@ -28,8 +28,9 @@
 //! every selected tile; Open needs exactly one file. Items move through the
 //! "Move to…" dialog or by dragging tiles onto a folder tile or a sidebar
 //! folder. Both paths share the checks in [`move_dialog`]. Moves are sent
-//! in requests of at most [`MAX_BULK_ITEMS`]; the client splits deletes
-//! into requests of at most `MAX_DELETE_ITEMS`.
+//! in requests of at most [`MAX_BULK_ITEMS`] and deletions in requests of
+//! at most [`MAX_DELETE_ITEMS`]. Each deletion or move appears in the
+//! activity panel with progress after every request.
 //!
 //! # Opening files
 //!
@@ -52,12 +53,12 @@ use adw::prelude::*;
 use filester_app::api::models::{FileEntry, FileQuery, FolderFilter, FolderId, FolderVisibility};
 use filester_app::api::{
     ApiError, ApiKey, ClientConfig, DownloadConfig, FilesterClient, FolderTree, MAX_BULK_ITEMS,
-    PublicDownloader,
+    MAX_DELETE_ITEMS, ProgressCallback, PublicDownloader, TransferProgress,
 };
 use filester_app::cache::FileCache;
 use filester_app::config;
 use filester_app::secrets::{SecretStoreError, TokenStore};
-use filester_app::worker::Worker;
+use filester_app::worker::{TaskCancelled, Worker};
 use gtk::{gdk, gio, glib};
 use secrecy::SecretString;
 use tracing::{debug, info, warn};
@@ -68,7 +69,7 @@ use super::move_dialog::{self, Blocked};
 use super::preferences::PreferencesDialog;
 use super::settings::{self, OpenMode, Settings};
 use super::sidebar::Sidebar;
-use super::transfers::TransfersPanel;
+use super::transfers::{self, OperationReport, TransfersPanel};
 use super::{Location, spawn_ui};
 
 /// Longest wait for any keyring operation. Generous enough to type a
@@ -819,43 +820,73 @@ impl MainWindow {
     fn delete_items(self: &Rc<Self>, items: Vec<GridItem>) {
         let Some(client) = self.client() else { return };
         let label = describe_items(&items);
-        let total = items.len();
         let (folders, files) = split_items(items);
         let weak = Rc::downgrade(self);
-        spawn_ui(
+        self.transfers.enqueue_operation(
             &self.worker,
-            async move {
-                // The client splits each list into requests of at most
-                // MAX_DELETE_ITEMS.
-                let mut failed = 0;
-                if !files.is_empty() {
-                    failed += client.delete_files(&files).await?.failed_deletes;
+            &format!("Deleting {label}"),
+            &transfers::DELETE,
+            move |progress| async move {
+                // Batched here (the client would split too) so the panel can
+                // show progress after each request.
+                let mut tally = Tally::start(files.len() + folders.len(), progress);
+                for chunk in files.chunks(MAX_DELETE_ITEMS) {
+                    let report = client.delete_files(chunk).await?;
+                    tally.add(chunk.len(), report.failed_deletes);
                 }
-                if !folders.is_empty() {
-                    failed += client.delete_folders(&folders).await?.failed_deletes;
+                for chunk in folders.chunks(MAX_DELETE_ITEMS) {
+                    let report = client.delete_folders(chunk).await?;
+                    tally.add(chunk.len(), report.failed_deletes);
                 }
-                Ok::<_, ApiError>(failed)
+                Ok(tally.report())
             },
-            move |result| {
+            move |outcome| {
                 with(&weak, |this| {
-                    match result {
-                        Ok(Ok(0)) => this.toast(&format!("Deleted {label}")),
-                        Ok(Ok(failed)) if failed >= total as u64 => {
-                            this.toast(&format!("Couldn't delete {label}"));
-                        }
-                        Ok(Ok(failed)) => this.toast(&format!(
-                            "Deleted {} of {total} items; {failed} couldn't be deleted",
-                            (total as u64).saturating_sub(failed)
-                        )),
-                        Ok(Err(err)) => this.report_error(&err),
-                        Err(_cancelled) => return,
-                    }
-                    // Refresh even after an error: earlier chunks may have
-                    // succeeded.
-                    this.refresh();
+                    this.finish_operation(
+                        &outcome,
+                        &OperationText {
+                            label: &label,
+                            past: "Deleted",
+                            verb: "delete",
+                            destination: "",
+                        },
+                    );
                 });
             },
         );
+    }
+
+    /// Report a finished deletion or move, then refresh. Refreshing also
+    /// follows an error or a stop: batches sent before it took effect.
+    fn finish_operation(
+        self: &Rc<Self>,
+        outcome: &Result<Result<OperationReport, ApiError>, TaskCancelled>,
+        text: &OperationText<'_>,
+    ) {
+        let OperationText {
+            label,
+            past,
+            verb,
+            destination,
+        } = text;
+        match outcome {
+            Ok(Ok(report)) if report.failed == 0 => {
+                self.toast(&format!("{past} {label}{destination}"));
+            }
+            Ok(Ok(report)) if report.failed >= report.total => {
+                self.toast(&format!("Couldn't {verb} {label}{destination}"));
+            }
+            Ok(Ok(report)) => self.toast(&format!(
+                "{past} {} of {} items{destination}; {} couldn't be {}",
+                report.total.saturating_sub(report.failed),
+                report.total,
+                report.failed,
+                past.to_lowercase(),
+            )),
+            Ok(Err(err)) => self.report_error(err),
+            Err(TaskCancelled) => {}
+        }
+        self.refresh();
     }
 
     // --- Moving -------------------------------------------------------------------
@@ -902,39 +933,36 @@ impl MainWindow {
                 .map_or_else(|| "the folder".to_owned(), |f| f.name.clone()),
         };
         let label = describe_items(&items);
-        let total = items.len();
         let (folders, files) = split_items(items);
         let dest = dest.folder_id().cloned();
         let weak = Rc::downgrade(self);
-        spawn_ui(
+        self.transfers.enqueue_operation(
             &self.worker,
-            async move {
-                let mut failed = 0;
+            &format!("Moving {label} to “{dest_name}”"),
+            &transfers::MOVE,
+            move |progress| async move {
+                let mut tally = Tally::start(files.len() + folders.len(), progress);
                 for chunk in files.chunks(MAX_BULK_ITEMS) {
-                    failed += client.move_files(chunk, dest.as_ref()).await?.failed;
+                    let report = client.move_files(chunk, dest.as_ref()).await?;
+                    tally.add(chunk.len(), report.failed);
                 }
                 for chunk in folders.chunks(MAX_BULK_ITEMS) {
-                    failed += client.move_folders(chunk, dest.as_ref()).await?.failed;
+                    let report = client.move_folders(chunk, dest.as_ref()).await?;
+                    tally.add(chunk.len(), report.failed);
                 }
-                Ok::<_, ApiError>(failed)
+                Ok(tally.report())
             },
-            move |result| {
+            move |outcome| {
                 with(&weak, |this| {
-                    match result {
-                        Ok(Ok(0)) => this.toast(&format!("Moved {label} to “{dest_name}”")),
-                        Ok(Ok(failed)) if failed >= total as u64 => {
-                            this.toast(&format!("Couldn't move {label} to “{dest_name}”"));
-                        }
-                        Ok(Ok(failed)) => this.toast(&format!(
-                            "Moved {} of {total} items to “{dest_name}”; {failed} couldn't be moved",
-                            (total as u64).saturating_sub(failed)
-                        )),
-                        Ok(Err(err)) => this.report_error(&err),
-                        Err(_cancelled) => return,
-                    }
-                    // Refresh even after an error: earlier chunks may have
-                    // succeeded, and folder counts change either way.
-                    this.refresh();
+                    this.finish_operation(
+                        &outcome,
+                        &OperationText {
+                            label: &label,
+                            past: "Moved",
+                            verb: "move",
+                            destination: &format!(" to “{dest_name}”"),
+                        },
+                    );
                 });
             },
         );
@@ -1212,7 +1240,10 @@ impl MainWindow {
     fn confirm_close(self: &Rc<Self>) {
         let dialog = adw::AlertDialog::new(
             Some("Cancel Transfers?"),
-            Some("Uploads and downloads in progress will be cancelled if you quit now."),
+            Some(
+                "Uploads, downloads, deletions and moves in progress will be stopped if you quit \
+                 now.",
+            ),
         );
         dialog.add_response("cancel", "_Keep Going");
         dialog.add_response("quit", "_Quit");
@@ -1326,6 +1357,60 @@ impl MainWindow {
         self.actions.copy_link.set_enabled(signed_in && any_link);
         self.actions.open.set_enabled(signed_in && one_link);
         self.actions.open_link.set_enabled(signed_in && one_link);
+    }
+}
+
+/// Toast wording for a finished deletion or move.
+struct OperationText<'a> {
+    /// What was acted on: "“name”" or "N items".
+    label: &'a str,
+    /// "Deleted" / "Moved".
+    past: &'a str,
+    /// "delete" / "move".
+    verb: &'a str,
+    /// " to “Folder”" for moves, empty for deletions.
+    destination: &'a str,
+}
+
+/// Items done and failed across the batches of one deletion or move,
+/// reported to the activity panel after each batch.
+struct Tally {
+    total: u64,
+    done: u64,
+    failed: u64,
+    progress: ProgressCallback,
+}
+
+impl Tally {
+    /// Start counting `total` items; the panel pulses until the first batch.
+    fn start(total: usize, progress: ProgressCallback) -> Self {
+        let total = u64::try_from(total).unwrap_or(u64::MAX);
+        progress(TransferProgress { sent: 0, total });
+        Self {
+            total,
+            done: 0,
+            failed: 0,
+            progress,
+        }
+    }
+
+    fn add(&mut self, batch: usize, failed: u64) {
+        self.done = self
+            .done
+            .saturating_add(u64::try_from(batch).unwrap_or(u64::MAX))
+            .min(self.total);
+        self.failed = self.failed.saturating_add(failed).min(self.total);
+        (self.progress)(TransferProgress {
+            sent: self.done,
+            total: self.total,
+        });
+    }
+
+    fn report(&self) -> OperationReport {
+        OperationReport {
+            total: self.total,
+            failed: self.failed,
+        }
     }
 }
 
