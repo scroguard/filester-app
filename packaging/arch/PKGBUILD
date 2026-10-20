@@ -13,7 +13,7 @@
 # rather than a tarball checksum (hence SKIP).
 
 pkgname=filester-app
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Native GTK4/libadwaita client for the Filester cloud storage service (unofficial)'
 arch=('x86_64' 'aarch64')
