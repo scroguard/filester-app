@@ -9,7 +9,7 @@ cloud storage service, written in Rust.
 > official Filester app. The package and command are `filester-app`.
 
 [![CI](https://github.com/scroguard/filester-app/actions/workflows/ci.yml/badge.svg)](https://github.com/scroguard/filester-app/actions/workflows/ci.yml)
-License: GPL-3.0-or-later
+License: GPL-3.0-or-later · Picking the project up? Start with [HANDOFF.md](HANDOFF.md).
 
 ---
 
