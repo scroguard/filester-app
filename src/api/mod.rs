@@ -24,7 +24,7 @@ pub mod tree;
 mod upload;
 
 pub use auth::ApiKey;
-pub use client::{ClientConfig, FilesterClient, MAX_BULK_ITEMS};
+pub use client::{ClientConfig, FilesterClient, MAX_BULK_ITEMS, MAX_DELETE_ITEMS};
 pub use download::{DownloadConfig, MAX_DOWNLOAD_BYTES, PublicDownloader};
 pub use error::ApiError;
 pub use rate_limit::{RateLimitInfo, RetryPolicy};

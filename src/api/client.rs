@@ -65,6 +65,10 @@ use crate::config;
 const MAX_FOLDER_NAME_CHARS: usize = 100;
 /// Maximum items in one bulk move (API limit).
 pub const MAX_BULK_ITEMS: usize = 200;
+/// Maximum identifiers in one delete request (API limit). Longer lists are
+/// split into several requests by [`FilesterClient::delete_files`] and
+/// [`FilesterClient::delete_folders`].
+pub const MAX_DELETE_ITEMS: usize = 100;
 /// Cap on error-response bodies we bother to read.
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// Redirect hop limit (same-origin only).
@@ -392,14 +396,17 @@ impl FilesterClient {
 
     /// `POST /folder/delete`: deletes folders **and every file inside them**.
     ///
+    /// Lists longer than [`MAX_DELETE_ITEMS`] are sent as several requests,
+    /// and the returned report is their sum.
+    ///
     /// # Errors
     ///
     /// [`ApiError::InvalidArgument`] for an empty list. Otherwise see
-    /// [`ApiError`].
+    /// [`ApiError`]. If a later request fails, earlier ones have already
+    /// deleted their items.
     pub async fn delete_folders(&self, folders: &[FolderId]) -> Result<DeleteReport> {
         let ids = nonempty_ids(folders.iter().map(FolderId::as_str))?;
-        self.post_plain(&["folder", "delete"], &DeleteBody { identifiers: &ids })
-            .await
+        self.delete_in_batches(&["folder", "delete"], &ids).await
     }
 
     /// `POST /api/v1/folder/thumbnail`: set a folder's cover image (JPG, PNG,
@@ -532,14 +539,30 @@ impl FilesterClient {
 
     /// `POST /file/delete`.
     ///
+    /// Lists longer than [`MAX_DELETE_ITEMS`] are sent as several requests,
+    /// and the returned report is their sum.
+    ///
     /// # Errors
     ///
     /// [`ApiError::InvalidArgument`] for an empty list. Otherwise see
-    /// [`ApiError`].
+    /// [`ApiError`]. If a later request fails, earlier ones have already
+    /// deleted their items.
     pub async fn delete_files(&self, files: &[String]) -> Result<DeleteReport> {
         let ids = nonempty_ids(files.iter().map(String::as_str))?;
-        self.post_plain(&["file", "delete"], &DeleteBody { identifiers: &ids })
-            .await
+        self.delete_in_batches(&["file", "delete"], &ids).await
+    }
+
+    /// Send `ids` to a delete endpoint in requests of at most
+    /// [`MAX_DELETE_ITEMS`], summing the reports.
+    async fn delete_in_batches(&self, segments: &[&str], ids: &[String]) -> Result<DeleteReport> {
+        let mut total = DeleteReport::default();
+        for chunk in ids.chunks(MAX_DELETE_ITEMS) {
+            let report: DeleteReport = self
+                .post_plain(segments, &DeleteBody { identifiers: chunk })
+                .await?;
+            total += report;
+        }
+        Ok(total)
     }
 
     // --- Upload ---------------------------------------------------------------

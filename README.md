@@ -335,6 +335,11 @@ every `/api/v1/*` path.
 | `POST /api/v1/file/move`, `/files/move` | `move_file`, `move_files` | 429, connect only |
 | `POST /file/delete`, `/folder/delete` | `delete_files`, `delete_folders` | 429, connect only |
 
+The bulk endpoints take limited lists: at most 200 items per move request
+(`MAX_BULK_ITEMS`) and 100 per delete request (`MAX_DELETE_ITEMS`).
+`delete_files` and `delete_folders` split longer lists into consecutive
+requests and add up the reports; the window does the same for moves.
+
 POST requests are never retried after the server may have processed them.
 A 429 means the request was rejected up front, and a connect failure means
 it never left the machine.

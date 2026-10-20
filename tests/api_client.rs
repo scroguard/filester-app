@@ -14,8 +14,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use filester_app::api::models::{FileQuery, FolderFilter, FolderId, FolderVisibility};
 use filester_app::api::{
-    ApiError, ApiKey, ClientConfig, FilesterClient, MAX_UPLOAD_BYTES, ProgressCallback,
-    RetryPolicy, TransferProgress, TreeAnomaly,
+    ApiError, ApiKey, ClientConfig, FilesterClient, MAX_DELETE_ITEMS, MAX_UPLOAD_BYTES,
+    ProgressCallback, RetryPolicy, TransferProgress, TreeAnomaly,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -326,6 +326,62 @@ async fn delete_uses_legacy_paths_and_top_level_report() {
     assert_eq!(report.successful_deletes, 2);
     assert!(matches!(
         c.delete_folders(&[FolderId::new("f")]).await,
+        Err(ApiError::Rejected { .. })
+    ));
+}
+
+/// The API accepts at most 100 identifiers per delete; longer lists are
+/// split into consecutive requests and the reports summed.
+#[tokio::test]
+async fn delete_splits_into_requests_of_at_most_100() {
+    let server = MockServer::start().await;
+    let ids: Vec<String> = (0..250).map(|i| format!("f{i:03}")).collect();
+    for chunk in ids.chunks(MAX_DELETE_ITEMS) {
+        Mock::given(method("POST"))
+            .and(path("/file/delete"))
+            .and(body_json(json!({ "identifiers": chunk })))
+            .respond_with(ok(&json!({
+                "success": true, "total_processed": chunk.len(),
+                "successful_deletes": chunk.len() - 1, "failed_deletes": 1,
+                "files_deleted": chunk.len() - 1})))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let report = client(&server).delete_files(&ids).await.unwrap();
+    assert_eq!(MAX_DELETE_ITEMS, 100);
+    assert_eq!(report.total_processed, 250);
+    assert_eq!(report.successful_deletes, 247);
+    assert_eq!(report.failed_deletes, 3);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+}
+
+/// A failed batch stops the delete; batches already sent stay deleted.
+#[tokio::test]
+async fn delete_stops_at_the_first_failed_batch() {
+    let server = MockServer::start().await;
+    let ids: Vec<String> = (0..150).map(|i| format!("d{i:03}")).collect();
+    Mock::given(method("POST"))
+        .and(path("/folder/delete"))
+        .and(body_json(json!({ "identifiers": &ids[..100] })))
+        .respond_with(ok(&json!({"success": true, "total_processed": 100,
+            "successful_deletes": 100, "failed_deletes": 0})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/folder/delete"))
+        .and(body_json(json!({ "identifiers": &ids[100..] })))
+        .respond_with(ok(
+            &json!({"success": false, "message": "Folder is locked"}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let folders: Vec<FolderId> = ids.iter().map(FolderId::new).collect();
+    assert!(matches!(
+        client(&server).delete_folders(&folders).await,
         Err(ApiError::Rejected { .. })
     ));
 }

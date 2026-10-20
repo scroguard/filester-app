@@ -27,8 +27,9 @@
 //! The grid allows multiple selection. Delete, Copy Link and Move act on
 //! every selected tile; Open needs exactly one file. Items move through the
 //! "Move to…" dialog or by dragging tiles onto a folder tile or a sidebar
-//! folder. Both paths share the checks in [`move_dialog`] and send bulk
-//! requests of at most [`MAX_BULK_ITEMS`].
+//! folder. Both paths share the checks in [`move_dialog`]. Moves are sent
+//! in requests of at most [`MAX_BULK_ITEMS`]; the client splits deletes
+//! into requests of at most `MAX_DELETE_ITEMS`.
 //!
 //! # Opening files
 //!
@@ -824,12 +825,14 @@ impl MainWindow {
         spawn_ui(
             &self.worker,
             async move {
+                // The client splits each list into requests of at most
+                // MAX_DELETE_ITEMS.
                 let mut failed = 0;
-                for chunk in files.chunks(MAX_BULK_ITEMS) {
-                    failed += client.delete_files(chunk).await?.failed_deletes;
+                if !files.is_empty() {
+                    failed += client.delete_files(&files).await?.failed_deletes;
                 }
-                for chunk in folders.chunks(MAX_BULK_ITEMS) {
-                    failed += client.delete_folders(chunk).await?.failed_deletes;
+                if !folders.is_empty() {
+                    failed += client.delete_folders(&folders).await?.failed_deletes;
                 }
                 Ok::<_, ApiError>(failed)
             },

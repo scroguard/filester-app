@@ -20,8 +20,10 @@ selection and moving, which are not released yet._
   - Multiple selection in the grid (Ctrl/Shift+click, box select, Ctrl+A).
   - Move via "Move to…" (Ctrl+M) or drag-and-drop onto a folder tile or
     sidebar folder; bulk delete; copy links; new folder; storage gauge.
-    Moves and deletes use the bulk endpoints in chunks of `MAX_BULK_ITEMS`
-    (200). No rename call is implemented.
+    Moves are sent in requests of at most `MAX_BULK_ITEMS` (200). Deletes
+    are limited by the API to 100 identifiers per request, so
+    `delete_files` / `delete_folders` split longer lists themselves
+    (`MAX_DELETE_ITEMS`). No rename call is implemented.
   - Rate-limit handling with `Retry-After`.
   - Opening files in the browser (default), or opening public files in local
     apps through a cache that is cleaned automatically.

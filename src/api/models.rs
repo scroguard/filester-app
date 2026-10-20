@@ -417,6 +417,18 @@ pub struct DeleteReport {
     pub files_deleted: u64,
 }
 
+impl std::ops::AddAssign for DeleteReport {
+    /// Combine the reports of a delete split across several requests.
+    fn add_assign(&mut self, other: Self) {
+        self.total_processed = self.total_processed.saturating_add(other.total_processed);
+        self.successful_deletes = self
+            .successful_deletes
+            .saturating_add(other.successful_deletes);
+        self.failed_deletes = self.failed_deletes.saturating_add(other.failed_deletes);
+        self.files_deleted = self.files_deleted.saturating_add(other.files_deleted);
+    }
+}
+
 /// Result of `GET /health`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Health {
