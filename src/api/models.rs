@@ -158,14 +158,15 @@ pub struct FileEntry {
 }
 
 impl FileEntry {
-    /// The identifier to send to move and delete endpoints. They accept a
-    /// slug, a UUID or a numeric ID, and this prefers them in that order.
+    /// The identifier to send to move and delete endpoints: the numeric ID.
+    ///
+    /// The documentation says these endpoints accept a slug, a UUID or a
+    /// numeric ID, but `POST /file/delete` rejects UUIDs ("All file
+    /// deletions failed"; verified October 2026). The numeric ID is accepted
+    /// by every endpoint and is the one field every listing includes.
     #[must_use]
     pub fn reference(&self) -> String {
-        self.slug
-            .clone()
-            .or_else(|| self.uuid.clone())
-            .unwrap_or_else(|| self.id.to_string())
+        self.id.to_string()
     }
 
     /// The public share slug: the `slug` field when present, otherwise the
@@ -660,12 +661,11 @@ mod tests {
     }
 
     #[test]
-    fn file_reference_prefers_slug_then_uuid() {
-        let mut f: FileEntry =
+    fn file_reference_is_always_the_numeric_id() {
+        // Top-level listings carry a UUID, which the delete endpoint refuses.
+        let f: FileEntry =
             serde_json::from_str(r#"{"id":1,"uuid":"u-1","slug":"aBcDeFg","name":"a"}"#).unwrap();
-        assert_eq!(f.reference(), "aBcDeFg");
-        f.slug = None;
-        assert_eq!(f.reference(), "u-1");
+        assert_eq!(f.reference(), "1");
     }
 
     #[test]
