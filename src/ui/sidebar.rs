@@ -4,6 +4,9 @@
 //! children are built lazily from the in-memory [`FolderTree`]. Expanding a
 //! row costs nothing on the network. The whole hierarchy is fetched once per
 //! refresh by `GET /api/v1/folders`.
+//!
+//! Every row, "My Files" included, is a drop target for tiles dragged from
+//! the file grid, so items can be moved by dropping them on a folder here.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -14,6 +17,10 @@ use filester_app::api::models::{Account, Folder};
 use gtk::{gio, glib};
 
 use super::Location;
+use super::file_grid::{DraggedItems, GridItem};
+
+/// Called when grid tiles are dropped onto a row.
+type DropHandler = Rc<dyn Fn(Vec<GridItem>, Location)>;
 
 /// Model item for one sidebar row.
 #[derive(Debug, Clone)]
@@ -35,6 +42,7 @@ pub struct Sidebar {
     footer: gtk::Box,
     storage_bar: gtk::ProgressBar,
     storage_label: gtk::Label,
+    on_drop: Rc<RefCell<Option<DropHandler>>>,
 }
 
 impl Sidebar {
@@ -43,7 +51,11 @@ impl Sidebar {
             .autoselect(false)
             .can_unselect(true)
             .build();
-        let list = gtk::ListView::new(Some(selection.clone()), Some(row_factory()));
+        let on_drop = Rc::new(RefCell::new(None));
+        let list = gtk::ListView::new(
+            Some(selection.clone()),
+            Some(row_factory(Rc::clone(&on_drop))),
+        );
         list.add_css_class("navigation-sidebar");
         list.update_property(&[gtk::accessible::Property::Label("Folders")]);
         let scrolled = gtk::ScrolledWindow::builder()
@@ -82,6 +94,7 @@ impl Sidebar {
             footer,
             storage_bar,
             storage_label,
+            on_drop,
         }
     }
 
@@ -106,6 +119,11 @@ impl Sidebar {
                 f(row.location);
             }
         });
+    }
+
+    /// Call `f(items, destination)` when grid tiles are dropped on a row.
+    pub fn connect_drop(&self, f: impl Fn(Vec<GridItem>, Location) + 'static) {
+        *self.on_drop.borrow_mut() = Some(Rc::new(f));
     }
 
     /// Replace the folder hierarchy and select `current`.
@@ -226,10 +244,40 @@ fn find_position(model: &gtk::TreeListModel, location: &Location) -> Option<u32>
     })
 }
 
+/// The `Row` a list item currently shows.
+fn bound_row(item: &gtk::ListItem) -> Option<Row> {
+    let tree_row = item.item().and_downcast::<gtk::TreeListRow>()?;
+    let boxed = tree_row.item().and_downcast::<glib::BoxedAnyObject>()?;
+    let row = boxed.try_borrow::<Row>().ok()?.clone();
+    Some(row)
+}
+
+/// Drop target that hands dragged grid tiles to the sidebar's handler,
+/// with the row's location as the destination.
+fn row_drop_target(
+    item: &gtk::ListItem,
+    on_drop: Rc<RefCell<Option<DropHandler>>>,
+) -> gtk::DropTarget {
+    let target = DraggedItems::drop_target();
+    let item_weak = item.downgrade();
+    target.connect_drop(move |_, value, _, _| {
+        let row = item_weak.upgrade().as_ref().and_then(bound_row);
+        let (Some(row), Some(items)) = (row, DraggedItems::from_value(value)) else {
+            return false;
+        };
+        let handler = on_drop.borrow().clone();
+        if let Some(handler) = handler {
+            handler(items, row.location);
+        }
+        true
+    });
+    target
+}
+
 /// Factory for `TreeExpander > Box(Image, Label)` rows.
-fn row_factory() -> gtk::SignalListItemFactory {
+fn row_factory(on_drop: Rc<RefCell<Option<DropHandler>>>) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, obj| {
+    factory.connect_setup(move |_, obj| {
         let Some(item) = obj.downcast_ref::<gtk::ListItem>() else {
             return;
         };
@@ -243,6 +291,7 @@ fn row_factory() -> gtk::SignalListItemFactory {
         content.append(&label);
         let expander = gtk::TreeExpander::new();
         expander.set_child(Some(&content));
+        expander.add_controller(row_drop_target(item, Rc::clone(&on_drop)));
         item.set_child(Some(&expander));
     });
     factory.connect_bind(|_, obj| {

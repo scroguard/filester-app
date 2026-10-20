@@ -4,7 +4,8 @@ Use this to get back into the project quickly. The [README](README.md) has the
 full design and security write-up. This file covers where things stand, where
 to make changes, and the traps found the hard way.
 
-_Last updated 2026-10-19, at release v0.1.1 (commit `4649594`)._
+_Last updated 2026-10-19. Latest release: v0.1.1. `main` also has multiple
+selection and moving, which are not released yet._
 
 ## Current state
 
@@ -16,10 +17,11 @@ _Last updated 2026-10-19, at release v0.1.1 (commit `4649594`)._
   - API-key sign-in stored in the Secret Service.
   - Folder sidebar and file grid.
   - Streamed uploads up to 10 GB (button or drag-and-drop).
-  - New folder, delete with confirmation, copy share link, storage gauge.
-  - Moving files and folders is implemented in the API layer
-    (`move_file(s)`, `move_folder(s)`) and tested live, but nothing in the UI
-    uses it yet. No rename call is implemented.
+  - Multiple selection in the grid (Ctrl/Shift+click, box select, Ctrl+A).
+  - Move via "Move to…" (Ctrl+M) or drag-and-drop onto a folder tile or
+    sidebar folder; bulk delete; copy links; new folder; storage gauge.
+    Moves and deletes use the bulk endpoints in chunks of `MAX_BULK_ITEMS`
+    (200). No rename call is implemented.
   - Rate-limit handling with `Retry-After`.
   - Opening files in the browser (default), or opening public files in local
     apps through a cache that is cleaned automatically.
@@ -62,7 +64,8 @@ pedantic clippy warnings as errors in CI.
 | Download cache | `src/cache.rs` | Directories are 0700 and files 0600, created with `O_EXCL`. Cleanup is symlink-safe. |
 | Background runtime | `src/worker.rs` | **The GTK thread never blocks.** All I/O goes through `Worker::spawn` / `ui::spawn_ui`. |
 | Main window, actions, menus | `src/ui/window.rs` | The largest file. Start here for UI changes. |
-| Sidebar, grid, transfers | `src/ui/sidebar.rs`, `file_grid.rs`, `transfers.rs` | |
+| Sidebar, grid, transfers | `src/ui/sidebar.rs`, `file_grid.rs`, `transfers.rs` | The grid uses `MultiSelection`. Drags carry `DraggedItems` as an in-process GObject value. |
+| Move dialog and move rules | `src/ui/move_dialog.rs` | `check()` is shared by the dialog and drag-and-drop, and is unit tested. |
 | Preferences and settings file | `src/ui/preferences.rs`, `src/ui/settings.rs` | `$XDG_CONFIG_HOME/io.github.scroguard.Filester/settings.ini` |
 | Desktop entry, AppStream, icon | `data/` | Validated in CI. |
 | Packaging | `Cargo.toml` (`[package.metadata.deb]`, `[package.metadata.generate-rpm]`), `packaging/arch/PKGBUILD`, `install.sh` | |
@@ -159,8 +162,6 @@ Conventions:
 
 ## Open ideas (not started)
 
-- [ ] Move files and folders from the UI (drag onto a sidebar folder, or a
-      "Move to…" dialog). The API calls already exist.
 - [ ] Publish `packaging/arch/PKGBUILD` to the AUR. The PKGBUILD is ready and
       builds from the tag.
 - [ ] Flatpak manifest. The planned permissions are described in

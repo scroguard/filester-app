@@ -64,7 +64,7 @@ use crate::config;
 /// Maximum folder name length (API limit).
 const MAX_FOLDER_NAME_CHARS: usize = 100;
 /// Maximum items in one bulk move (API limit).
-const MAX_BULK_ITEMS: usize = 200;
+pub const MAX_BULK_ITEMS: usize = 200;
 /// Cap on error-response bodies we bother to read.
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// Redirect hop limit (same-origin only).

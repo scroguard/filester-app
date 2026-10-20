@@ -17,6 +17,7 @@
 
 mod file_grid;
 mod format;
+mod move_dialog;
 mod preferences;
 mod settings;
 mod sidebar;

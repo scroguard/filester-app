@@ -42,7 +42,13 @@ License: GPL-3.0-or-later · Picking the project up? Start with [HANDOFF.md](HAN
   opening locally. Two of each run at a time, the rest queue, and each has a
   progress bar and a cancel button. Closing the window with transfers in
   progress asks first.
-- New folder (private by default), delete with confirmation, copy share link.
+- Multiple selection: Ctrl+click, Shift+click, drag a box on empty space,
+  or Ctrl+A. Delete, Move and Copy Link act on everything selected.
+- Move files and folders with **Move to…** (right-click or Ctrl+M), which
+  lists every folder and greys out the invalid ones, or by dragging the
+  selection onto a folder tile or a folder in the sidebar. The dialog warns
+  when the destination is public.
+- New folder (private by default), delete with confirmation, copy share links.
 - Storage usage gauge.
 - Adaptive layout that collapses to a single pane on narrow windows.
 
@@ -55,13 +61,15 @@ License: GPL-3.0-or-later · Picking the project up? Start with [HANDOFF.md](HAN
 | <kbd>F5</kbd> / <kbd>Ctrl</kbd>+<kbd>R</kbd> | Refresh |
 | <kbd>Alt</kbd>+<kbd>↑</kbd> | Parent folder |
 | <kbd>Enter</kbd> | Open selected item |
-| <kbd>Delete</kbd> | Delete selected item (file grid focused) |
-| <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy share link (file grid focused) |
+| <kbd>Ctrl</kbd>+<kbd>A</kbd> / <kbd>Escape</kbd> | Select all / clear selection (file grid focused) |
+| <kbd>Delete</kbd> | Delete selected items (file grid focused) |
+| <kbd>Ctrl</kbd>+<kbd>M</kbd> | Move selected items (file grid focused) |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd> | Copy share links, one per line (file grid focused) |
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | Preferences |
 | <kbd>Ctrl</kbd>+<kbd>W</kbd> / <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Close / quit |
 
-Delete and Ctrl+C are bound only to the file grid, so they can never fire
-while you're typing in a text field.
+Delete, Ctrl+M and Ctrl+C are bound only to the file grid, so they can
+never fire while you're typing in a text field.
 
 ## Why Rust + gtk4-rs
 

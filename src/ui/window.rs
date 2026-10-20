@@ -22,6 +22,14 @@
 //! touched. Each folder load carries a generation number, and results for a
 //! location the user has since left are discarded.
 //!
+//! # Selection and moving
+//!
+//! The grid allows multiple selection. Delete, Copy Link and Move act on
+//! every selected tile; Open needs exactly one file. Items move through the
+//! "Move to…" dialog or by dragging tiles onto a folder tile or a sidebar
+//! folder. Both paths share the checks in [`move_dialog`] and send bulk
+//! requests of at most [`MAX_BULK_ITEMS`].
+//!
 //! # Opening files
 //!
 //! With the default [`OpenMode::Browser`], opening a file shows its share
@@ -40,9 +48,10 @@ use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 use adw::prelude::*;
-use filester_app::api::models::{FileEntry, FileQuery, FolderFilter, FolderVisibility};
+use filester_app::api::models::{FileEntry, FileQuery, FolderFilter, FolderId, FolderVisibility};
 use filester_app::api::{
-    ApiError, ApiKey, ClientConfig, DownloadConfig, FilesterClient, FolderTree, PublicDownloader,
+    ApiError, ApiKey, ClientConfig, DownloadConfig, FilesterClient, FolderTree, MAX_BULK_ITEMS,
+    PublicDownloader,
 };
 use filester_app::cache::FileCache;
 use filester_app::config;
@@ -54,6 +63,7 @@ use tracing::{debug, info, warn};
 
 use super::file_grid::{FileGrid, GridItem};
 use super::format::{self, describe_error, is_safe_share_url, plain_toast};
+use super::move_dialog::{self, Blocked};
 use super::preferences::PreferencesDialog;
 use super::settings::{self, OpenMode, Settings};
 use super::sidebar::Sidebar;
@@ -77,6 +87,7 @@ struct Actions {
     refresh: gio::SimpleAction,
     go_up: gio::SimpleAction,
     delete: gio::SimpleAction,
+    move_items: gio::SimpleAction,
     copy_link: gio::SimpleAction,
     open: gio::SimpleAction,
     open_link: gio::SimpleAction,
@@ -96,6 +107,7 @@ impl Actions {
             refresh: make("refresh"),
             go_up: make("go-up"),
             delete: make("delete"),
+            move_items: make("move"),
             copy_link: make("copy-link"),
             open: make("open"),
             open_link: make("open-link"),
@@ -103,13 +115,14 @@ impl Actions {
         }
     }
 
-    fn all(&self) -> [&gio::SimpleAction; 9] {
+    fn all(&self) -> [&gio::SimpleAction; 10] {
         [
             &self.upload,
             &self.new_folder,
             &self.refresh,
             &self.go_up,
             &self.delete,
+            &self.move_items,
             &self.copy_link,
             &self.open,
             &self.open_link,
@@ -309,8 +322,9 @@ impl MainWindow {
         bind(&self.actions.refresh, Self::refresh);
         bind(&self.actions.go_up, Self::go_up);
         bind(&self.actions.delete, Self::confirm_delete);
+        bind(&self.actions.move_items, Self::choose_move);
         bind(&self.actions.copy_link, Self::copy_link);
-        bind(&self.actions.open, Self::open_file);
+        bind(&self.actions.open, Self::open_selected);
         bind(&self.actions.open_link, Self::open_link);
         bind(&self.actions.sign_out, |this| this.sign_out(None));
 
@@ -328,7 +342,11 @@ impl MainWindow {
         // Item shortcuts apply only while the grid has focus, so Delete in a
         // text entry can never trigger a deletion.
         let shortcuts = gtk::ShortcutController::new();
-        for (trigger, action) in [("Delete", "win.delete"), ("<Control>c", "win.copy-link")] {
+        for (trigger, action) in [
+            ("Delete", "win.delete"),
+            ("<Control>c", "win.copy-link"),
+            ("<Control>m", "win.move"),
+        ] {
             if let Some(trigger) = gtk::ShortcutTrigger::parse_string(trigger) {
                 shortcuts.add_shortcut(gtk::Shortcut::new(
                     Some(trigger),
@@ -361,8 +379,16 @@ impl MainWindow {
         self.grid.connect_activate(move |item| {
             with(&weak, |this| match item {
                 GridItem::Folder(folder) => this.navigate(Location::Folder(folder.id)),
-                GridItem::File(_) => this.open_file(),
+                GridItem::File(file) => this.open_file(file),
             });
+        });
+        let weak = Rc::downgrade(self);
+        self.grid.connect_move(move |items, dest| {
+            with(&weak, |this| this.move_items(items, &dest));
+        });
+        let weak = Rc::downgrade(self);
+        self.sidebar.connect_drop(move |items, dest| {
+            with(&weak, |this| this.move_items(items, &dest));
         });
         let weak = Rc::downgrade(self);
         self.grid
@@ -748,18 +774,32 @@ impl MainWindow {
     }
 
     fn confirm_delete(self: &Rc<Self>) {
-        let Some(item) = self.grid.selected() else {
-            return;
+        let items = self.grid.selected();
+        let folders = items
+            .iter()
+            .filter(|i| matches!(i, GridItem::Folder(_)))
+            .count();
+        let files = items.len() - folders;
+        let heading = match items.as_slice() {
+            [] => return,
+            [one] => format!("Delete “{}”?", one.name()),
+            many => format!("Delete {} Items?", many.len()),
         };
-        let body = match &item {
-            GridItem::Folder(_) => {
-                "The folder and every file inside it will be permanently deleted."
+        let body = match (folders, files) {
+            (0, 1) => "The file will be permanently deleted.".to_owned(),
+            (0, n) => format!("{n} files will be permanently deleted."),
+            (1, 0) => "The folder and every file inside it will be permanently deleted.".to_owned(),
+            (n, 0) => {
+                format!("{n} folders and every file inside them will be permanently deleted.")
             }
-            GridItem::File(_) => "The file will be permanently deleted.",
+            (d, f) => format!(
+                "{} and {}, including every file inside the folders, will be permanently deleted.",
+                plural(d, "folder"),
+                plural(f, "file"),
+            ),
         };
-        let heading = format!("Delete “{}”?", item.name());
         // AlertDialog heading and body are plain text unless *-use-markup is set.
-        let dialog = adw::AlertDialog::new(Some(&heading), Some(body));
+        let dialog = adw::AlertDialog::new(Some(&heading), Some(&body));
         dialog.add_response("cancel", "_Cancel");
         dialog.add_response("delete", "_Delete");
         dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
@@ -770,59 +810,168 @@ impl MainWindow {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             if dialog.choose_future(Some(&window)).await == "delete" {
-                with(&weak, |this| this.delete_item(item));
+                with(&weak, |this| this.delete_items(items));
             }
         });
     }
 
-    fn delete_item(self: &Rc<Self>, item: GridItem) {
+    fn delete_items(self: &Rc<Self>, items: Vec<GridItem>) {
         let Some(client) = self.client() else { return };
-        let name = item.name().to_owned();
+        let label = describe_items(&items);
+        let total = items.len();
+        let (folders, files) = split_items(items);
         let weak = Rc::downgrade(self);
         spawn_ui(
             &self.worker,
             async move {
-                match item {
-                    GridItem::Folder(f) => client.delete_folders(&[f.id]).await,
-                    GridItem::File(f) => client.delete_files(&[f.reference()]).await,
+                let mut failed = 0;
+                for chunk in files.chunks(MAX_BULK_ITEMS) {
+                    failed += client.delete_files(chunk).await?.failed_deletes;
                 }
+                for chunk in folders.chunks(MAX_BULK_ITEMS) {
+                    failed += client.delete_folders(chunk).await?.failed_deletes;
+                }
+                Ok::<_, ApiError>(failed)
             },
             move |result| {
-                with(&weak, |this| match result {
-                    Ok(Ok(report)) if report.failed_deletes == 0 => {
-                        this.toast(&format!("Deleted “{name}”"));
-                        this.refresh();
+                with(&weak, |this| {
+                    match result {
+                        Ok(Ok(0)) => this.toast(&format!("Deleted {label}")),
+                        Ok(Ok(failed)) if failed >= total as u64 => {
+                            this.toast(&format!("Couldn't delete {label}"));
+                        }
+                        Ok(Ok(failed)) => this.toast(&format!(
+                            "Deleted {} of {total} items; {failed} couldn't be deleted",
+                            (total as u64).saturating_sub(failed)
+                        )),
+                        Ok(Err(err)) => this.report_error(&err),
+                        Err(_cancelled) => return,
                     }
-                    Ok(Ok(_)) => {
-                        this.toast(&format!("Couldn't delete “{name}”"));
-                        this.refresh();
-                    }
-                    Ok(Err(err)) => this.report_error(&err),
-                    Err(_cancelled) => {}
+                    // Refresh even after an error: earlier chunks may have
+                    // succeeded.
+                    this.refresh();
                 });
             },
         );
     }
 
-    /// Share URL of the selected file, if it passes validation.
-    fn selected_share_url(&self) -> Option<String> {
-        match self.grid.selected()? {
-            GridItem::File(FileEntry { url: Some(url), .. }) if is_safe_share_url(&url) => {
-                Some(url)
+    // --- Moving -------------------------------------------------------------------
+
+    /// Ask where to move the selection, then move it.
+    fn choose_move(self: &Rc<Self>) {
+        let items = self.grid.selected();
+        if items.is_empty() {
+            return;
+        }
+        let (from, tree) = {
+            let state = self.state.borrow();
+            (state.location.clone(), Rc::clone(&state.tree))
+        };
+        let window = self.window.clone();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            if let Some(dest) = move_dialog::choose(&window, &tree, &items, &from).await {
+                with(&weak, |this| this.move_items(items, &dest));
             }
+        });
+    }
+
+    /// Move `items` (all in the current location) to `dest`.
+    fn move_items(self: &Rc<Self>, items: Vec<GridItem>, dest: &Location) {
+        let Some(client) = self.client() else { return };
+        let (from, tree) = {
+            let state = self.state.borrow();
+            (state.location.clone(), Rc::clone(&state.tree))
+        };
+        if let Err(blocked) =
+            move_dialog::check(&tree, &move_dialog::folder_ids(&items), &from, dest)
+        {
+            self.toast(match blocked {
+                Blocked::AlreadyHere => "Already in that folder",
+                Blocked::IntoItself => "A folder can't be moved into itself",
+            });
+            return;
+        }
+        let dest_name = match dest {
+            Location::Root => "My Files".to_owned(),
+            Location::Folder(id) => tree
+                .get(id)
+                .map_or_else(|| "the folder".to_owned(), |f| f.name.clone()),
+        };
+        let label = describe_items(&items);
+        let total = items.len();
+        let (folders, files) = split_items(items);
+        let dest = dest.folder_id().cloned();
+        let weak = Rc::downgrade(self);
+        spawn_ui(
+            &self.worker,
+            async move {
+                let mut failed = 0;
+                for chunk in files.chunks(MAX_BULK_ITEMS) {
+                    failed += client.move_files(chunk, dest.as_ref()).await?.failed;
+                }
+                for chunk in folders.chunks(MAX_BULK_ITEMS) {
+                    failed += client.move_folders(chunk, dest.as_ref()).await?.failed;
+                }
+                Ok::<_, ApiError>(failed)
+            },
+            move |result| {
+                with(&weak, |this| {
+                    match result {
+                        Ok(Ok(0)) => this.toast(&format!("Moved {label} to “{dest_name}”")),
+                        Ok(Ok(failed)) if failed >= total as u64 => {
+                            this.toast(&format!("Couldn't move {label} to “{dest_name}”"));
+                        }
+                        Ok(Ok(failed)) => this.toast(&format!(
+                            "Moved {} of {total} items to “{dest_name}”; {failed} couldn't be moved",
+                            (total as u64).saturating_sub(failed)
+                        )),
+                        Ok(Err(err)) => this.report_error(&err),
+                        Err(_cancelled) => return,
+                    }
+                    // Refresh even after an error: earlier chunks may have
+                    // succeeded, and folder counts change either way.
+                    this.refresh();
+                });
+            },
+        );
+    }
+
+    /// The selected file, when exactly one tile is selected and it is a file.
+    fn selected_file(&self) -> Option<FileEntry> {
+        match self.grid.selected().as_slice() {
+            [GridItem::File(file)] => Some(file.clone()),
             _ => None,
         }
     }
 
+    /// Validated share URLs of every selected file, in grid order.
+    fn selected_share_urls(&self) -> Vec<String> {
+        self.grid
+            .selected()
+            .into_iter()
+            .filter_map(|item| match item {
+                GridItem::File(file) => share_url(&file),
+                GridItem::Folder(_) => None,
+            })
+            .collect()
+    }
+
+    /// Copy the links of all selected files, one per line.
     fn copy_link(self: &Rc<Self>) {
-        if let Some(url) = self.selected_share_url() {
-            self.window.clipboard().set_text(&url);
-            self.toast("Link copied");
+        let urls = self.selected_share_urls();
+        match urls.len() {
+            0 => {}
+            1 => self.toast("Link copied"),
+            n => self.toast(&format!("{n} links copied")),
+        }
+        if !urls.is_empty() {
+            self.window.clipboard().set_text(&urls.join("\n"));
         }
     }
 
     fn open_link(self: &Rc<Self>) {
-        if let Some(url) = self.selected_share_url() {
+        if let Some(url) = self.selected_file().as_ref().and_then(share_url) {
             self.open_url(&url);
         }
     }
@@ -844,19 +993,22 @@ impl MainWindow {
         );
     }
 
-    /// Open the selected file as the preferences say: in the browser, or
-    /// (for public files) in the default local app.
-    fn open_file(self: &Rc<Self>) {
-        let Some(url) = self.selected_share_url() else {
+    fn open_selected(self: &Rc<Self>) {
+        if let Some(file) = self.selected_file() {
+            self.open_file(file);
+        }
+    }
+
+    /// Open `file` as the preferences say: in the browser, or (for public
+    /// files) in the default local app.
+    fn open_file(self: &Rc<Self>, file: FileEntry) {
+        let Some(url) = share_url(&file) else {
             return;
         };
         if self.settings.get().open_mode == OpenMode::Browser {
             self.open_url(&url);
             return;
         }
-        let Some(GridItem::File(file)) = self.grid.selected() else {
-            return;
-        };
         let (Some(slug), Some(downloader)) = (file.share_slug(), self.downloader.clone()) else {
             self.open_url(&url);
             return;
@@ -1161,12 +1313,51 @@ impl MainWindow {
 
     fn update_item_actions(&self) {
         let signed_in = self.state.borrow().client.is_some();
-        let has_selection = self.grid.selected().is_some();
-        let has_link = self.selected_share_url().is_some();
+        let has_selection = !self.grid.selected().is_empty();
+        let any_link = !self.selected_share_urls().is_empty();
+        let one_link = self.selected_file().as_ref().and_then(share_url).is_some();
         self.actions.delete.set_enabled(signed_in && has_selection);
-        self.actions.copy_link.set_enabled(signed_in && has_link);
-        self.actions.open.set_enabled(signed_in && has_link);
-        self.actions.open_link.set_enabled(signed_in && has_link);
+        self.actions
+            .move_items
+            .set_enabled(signed_in && has_selection);
+        self.actions.copy_link.set_enabled(signed_in && any_link);
+        self.actions.open.set_enabled(signed_in && one_link);
+        self.actions.open_link.set_enabled(signed_in && one_link);
+    }
+}
+
+/// A file's share URL, if it passes validation.
+fn share_url(file: &FileEntry) -> Option<String> {
+    file.url.clone().filter(|url| is_safe_share_url(url))
+}
+
+/// Split items into folder IDs and file references for bulk requests.
+fn split_items(items: Vec<GridItem>) -> (Vec<FolderId>, Vec<String>) {
+    let mut folders = Vec::new();
+    let mut files = Vec::new();
+    for item in items {
+        match item {
+            GridItem::Folder(f) => folders.push(f.id),
+            GridItem::File(f) => files.push(f.reference()),
+        }
+    }
+    (folders, files)
+}
+
+/// "“name”" for one item, "N items" for several, for toasts.
+fn describe_items(items: &[GridItem]) -> String {
+    match items {
+        [one] => format!("“{}”", one.name()),
+        many => format!("{} items", many.len()),
+    }
+}
+
+/// "1 folder", "3 files".
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
@@ -1382,6 +1573,7 @@ fn build_item_menu() -> gio::Menu {
     section.append(Some("_Copy Link"), Some("win.copy-link"));
     menu.append_section(None, &section);
     let section = gio::Menu::new();
+    section.append(Some("_Move to…"), Some("win.move"));
     section.append(Some("_Delete"), Some("win.delete"));
     menu.append_section(None, &section);
     menu
