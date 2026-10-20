@@ -1,6 +1,6 @@
 [package]
 name = "filester-app"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 # gtk4 0.11 and oo7 0.6 both declare MSRV 1.92; keep this in sync with
 # clippy.toml and the `msrv` job in .github/workflows/ci.yml.

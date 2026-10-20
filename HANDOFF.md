@@ -4,12 +4,11 @@ Use this to get back into the project quickly. The [README](README.md) has the
 full design and security write-up. This file covers where things stand, where
 to make changes, and the traps found the hard way.
 
-_Last updated 2026-10-19. Latest release: v0.1.1. `main` also has multiple
-selection and moving, which are not released yet._
+_Last updated 2026-10-19, at release v0.1.2._
 
 ## Current state
 
-- **Released:** [v0.1.1](https://github.com/scroguard/filester-app/releases/tag/v0.1.1)
+- **Released:** [v0.1.2](https://github.com/scroguard/filester-app/releases/tag/v0.1.2)
   ships `.deb` (Debian 13 / Ubuntu 24.04+), `.rpm` (Fedora), an Arch
   `.pkg.tar.zst` and a universal tarball with `install.sh`, plus
   `SHA256SUMS` and build-provenance attestations.
@@ -97,7 +96,7 @@ Conventions:
    workflow.
 4. Tag and push: `git tag -a vX.Y.Z -m "Filester Manager X.Y.Z" && git push origin vX.Y.Z`.
    (The README suggests `git tag -s`; no signing key is set up yet, so
-   v0.1.0 and v0.1.1 used `-a`.)
+   v0.1.0 to v0.1.2 used `-a`.)
 5. The workflow builds all four packages, installs each in a clean
    container, then publishes the release. Expect it to take about 15 minutes.
 6. Verify:

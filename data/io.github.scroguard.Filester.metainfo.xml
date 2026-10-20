@@ -50,6 +50,16 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.2" date="2026-10-19">
+      <description>
+        <ul>
+          <li>Select several files and folders at once with Ctrl+click, Shift+click, a selection box or Ctrl+A</li>
+          <li>Move files and folders with Move to… or by dragging them onto a folder</li>
+          <li>Deletions and moves show their progress in the Activity panel and can be stopped</li>
+          <li>Fixed deleting files that are not in a folder, and deleting more than 100 items at once</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-10-19">
       <description>
         <p>The app now appears as "Filester Manager" in the application menu and window, so it is not mistaken for an official Filester app. The command is still filester-app, and settings and the saved API key carry over.</p>
